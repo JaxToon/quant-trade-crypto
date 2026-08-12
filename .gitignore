@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.log
+trade_log.db
+backtrack_logs/
+model_checkpoints/
+dashboard/status.json

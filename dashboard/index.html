@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TraderStuff — Live Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-base:     #080c18;
+    --bg-surface:  rgba(255,255,255,0.04);
+    --bg-surface2: rgba(255,255,255,0.07);
+    --border:      rgba(255,255,255,0.08);
+    --border-hi:   rgba(255,255,255,0.15);
+    --text-primary:   #f0f4ff;
+    --text-secondary: rgba(240,244,255,0.5);
+    --text-dim:       rgba(240,244,255,0.28);
+    --green:   #10b981;
+    --green-bg: rgba(16,185,129,0.12);
+    --red:     #ef4444;
+    --red-bg:  rgba(239,68,68,0.12);
+    --amber:   #f59e0b;
+    --amber-bg: rgba(245,158,11,0.12);
+    --blue:    #3b82f6;
+    --blue-bg: rgba(59,130,246,0.1);
+    --radius:  14px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg-base);
+    background-image:
+      radial-gradient(ellipse 80% 60% at 10% 0%, rgba(59,130,246,0.06) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at 90% 100%, rgba(16,185,129,0.05) 0%, transparent 60%);
+    color: var(--text-primary);
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  /* ── Layout ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    padding: 0 4px;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .pulse {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .pulse.inactive { background: var(--red); box-shadow: 0 0 8px var(--red); animation: none; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.5; transform: scale(0.85); }
+  }
+  .last-update { font-size: 12px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
+
+  .grid {
+    display: grid;
+    gap: 14px;
+  }
+  .row-top    { grid-template-columns: 220px 200px 1fr; }
+  .row-middle { grid-template-columns: 1fr 1fr; }
+  .row-logs   { grid-template-columns: 1fr; }
+
+  /* ── Card base ── */
+  .card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    transition: border-color 0.3s;
+  }
+  .card:hover { border-color: var(--border-hi); }
+  .card-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+
+  /* ── Regime card ── */
+  .regime-value {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .regime-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .regime-turbulent { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+  .regime-normal    { background: var(--green-bg); color: var(--green); border: 1px solid rgba(16,185,129,0.2); }
+  .regime-low       { background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(59,130,246,0.2); }
+  .regime-unknown   { background: var(--bg-surface2); color: var(--text-secondary); }
+
+  .regime-big {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    margin: 10px 0 4px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ── Veto card ── */
+  .veto-indicator {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 90px;
+  }
+  .veto-dot {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    transition: all 0.4s;
+  }
+  .veto-dot.active   { background: var(--red-bg); box-shadow: 0 0 24px rgba(239,68,68,0.3); }
+  .veto-dot.inactive { background: var(--green-bg); box-shadow: 0 0 24px rgba(16,185,129,0.2); }
+  .veto-label { font-size: 12px; font-weight: 600; }
+  .veto-label.active   { color: var(--red); }
+  .veto-label.inactive { color: var(--green); }
+
+  /* ── GNN Signals ── */
+  .signal-list { display: flex; flex-direction: column; gap: 10px; }
+  .signal-row {
+    display: grid;
+    grid-template-columns: 72px 1fr 54px;
+    align-items: center;
+    gap: 10px;
+  }
+  .signal-symbol {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+  .signal-track {
+    height: 6px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 3px;
+    position: relative;
+    overflow: hidden;
+  }
+  .signal-fill {
+    position: absolute;
+    top: 0; height: 100%;
+    border-radius: 3px;
+    transition: all 0.6s ease;
+  }
+  .signal-fill.pos { background: linear-gradient(90deg, rgba(16,185,129,0.5), var(--green)); left: 50%; }
+  .signal-fill.neg { background: linear-gradient(270deg, rgba(239,68,68,0.5), var(--red)); right: 50%; }
+  .signal-fill.zero { width: 2px; left: calc(50% - 1px); background: var(--text-dim); }
+  .signal-center { position: absolute; left: 50%; top: -2px; width: 1px; height: 10px; background: rgba(255,255,255,0.15); }
+  .signal-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    text-align: right;
+  }
+  .signal-value.pos { color: var(--green); }
+  .signal-value.neg { color: var(--red); }
+  .signal-value.zero { color: var(--text-dim); }
+
+  /* ── Graph stats ── */
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .stat-box {
+    background: var(--bg-surface2);
+    border-radius: 10px;
+    padding: 12px;
+    text-align: center;
+  }
+  .stat-box .num {
+    font-size: 26px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: -1px;
+    color: var(--blue);
+  }
+  .stat-box .lbl { font-size: 10px; color: var(--text-dim); margin-top: 2px; letter-spacing: 0.5px; }
+  .edge-rows { display: flex; flex-direction: column; gap: 6px; }
+  .edge-row { display: flex; justify-content: space-between; align-items: center; }
+  .edge-type { font-size: 11px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+  .edge-count {
+    font-size: 11px; font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary);
+    background: var(--bg-surface2);
+    padding: 2px 7px;
+    border-radius: 6px;
+  }
+  .no-data { color: var(--text-dim); font-size: 12px; text-align: center; padding: 20px 0; }
+
+  /* ── Trades ── */
+  .trade-table { width: 100%; border-collapse: collapse; }
+  .trade-table th {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase;
+    color: var(--text-dim); padding: 0 0 8px; text-align: left;
+  }
+  .trade-table td {
+    font-size: 12px; font-family: 'JetBrains Mono', monospace;
+    padding: 6px 0; border-top: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .pnl-win { color: var(--green); }
+  .pnl-loss { color: var(--red); }
+
+  /* ── Entry insights ── */
+  .insight-grid { display: flex; flex-direction: column; gap: 10px; }
+  .insight-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 1fr;
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg-surface2);
+    border-radius: 10px;
+    align-items: start;
+  }
+  .insight-symbol { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; }
+  .insight-structure { font-size: 10px; color: var(--text-dim); margin-top: 3px; text-transform: capitalize; }
+  .insight-col-label { font-size: 9px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+  .insight-dir { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; margin-bottom: 4px; }
+  .insight-dir.long { background: var(--green-bg); color: var(--green); }
+  .insight-dir.short { background: var(--red-bg); color: var(--red); }
+  .insight-dir.neutral { background: var(--bg-surface); color: var(--text-dim); }
+  .insight-detail { font-size: 11px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; line-height: 1.7; }
+  .insight-note { font-size: 10px; color: var(--text-dim); margin-top: 4px; font-family: 'Inter', sans-serif; }
+  .insight-inactive { opacity: 0.5; }
+
+  /* ── Paper trading ── */
+  .paper-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .paper-box { background: var(--bg-surface2); border-radius: 10px; padding: 12px; text-align: center; }
+  .paper-box .num { font-size: 22px; font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: -1px; }
+  .paper-box .lbl { font-size: 9px; color: var(--text-dim); margin-top: 2px; letter-spacing: 0.5px; text-transform: uppercase; }
+  .paper-num-pos { color: var(--green); }
+  .paper-num-neg { color: var(--red); }
+  .paper-breakdown { display: flex; gap: 10px; }
+  .paper-market { flex: 1; background: var(--bg-surface2); border-radius: 10px; padding: 10px 12px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); }
+  .paper-market .mkt-title { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; font-family: 'Inter', sans-serif; }
+
+  /* ── Logs ── */
+  .log-terminal {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    height: 240px;
+    overflow-y: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+    scroll-behavior: smooth;
+  }
+  .log-terminal::-webkit-scrollbar { width: 4px; }
+  .log-terminal::-webkit-scrollbar-track { background: transparent; }
+  .log-terminal::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+  .log-line { display: block; }
+  .log-line.info    .lv { color: #60a5fa; }
+  .log-line.warning .lv { color: var(--amber); }
+  .log-line.error   .lv { color: var(--red); }
+  .log-ts { color: var(--text-dim); margin-right: 6px; }
+  .log-src { color: #8b9cf0; margin-right: 6px; }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .row-top    { grid-template-columns: 1fr 1fr; }
+    .row-middle { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .row-top { grid-template-columns: 1fr; }
+  }
+
+  .error-banner {
+    background: var(--red-bg);
+    border: 1px solid rgba(239,68,68,0.2);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--red);
+    margin-bottom: 14px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>
+    <div class="pulse" id="pulse"></div>
+    TraderStuff — Live Monitor
+  </h1>
+  <div class="last-update" id="last-update">connecting...</div>
+</div>
+
+<div class="error-banner" id="error-banner">⚠ Cannot reach API server. Is <code>run_dashboard.py</code> running?</div>
+
+<!-- Row 1: Regime | Veto | GNN Signals -->
+<div class="grid row-top" style="margin-bottom:14px">
+
+  <div class="card">
+    <div class="card-label">Market Regime</div>
+    <div id="regime-badge" class="regime-badge regime-unknown">● UNKNOWN</div>
+    <div id="regime-big" class="regime-big" style="color:var(--text-dim)">—</div>
+    <div style="font-size:11px; color:var(--text-dim); margin-top:4px" id="regime-sub">HMM state detector</div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Bear Veto</div>
+    <div class="veto-indicator">
+      <div class="veto-dot active" id="veto-dot">🛡</div>
+      <div class="veto-label active" id="veto-label">LOADING...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">GNN Signals</div>
+    <div class="signal-list" id="signal-list">
+      <div class="no-data">Waiting for signals...</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Row 2: Graph | Trades -->
+<div class="grid row-middle" style="margin-bottom:14px">
+
+  <div class="card">
+    <div class="card-label">Knowledge Graph</div>
+    <div class="stat-grid" id="stat-grid">
+      <div class="stat-box"><div class="num" id="total-nodes">—</div><div class="lbl">NODES</div></div>
+      <div class="stat-box"><div class="num" id="total-edges">—</div><div class="lbl">EDGES</div></div>
+    </div>
+    <div class="edge-rows" id="edge-rows">
+      <div class="no-data">Loading graph stats...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Trade History</div>
+    <div id="trade-area">
+      <div class="no-data" style="padding-top:30px">
+        No trades yet — system accumulating data
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Row Paper Trading: virtual $10k account scoring the insight recommendations -->
+<div class="grid row-logs" style="margin-bottom:14px">
+  <div class="card">
+    <div class="card-label">Paper Trading — Win Rate (virtual account, no real orders)</div>
+    <div class="paper-grid" id="paper-grid">
+      <div class="paper-box"><div class="num" id="paper-balance">—</div><div class="lbl">Balance</div></div>
+      <div class="paper-box"><div class="num" id="paper-return">—</div><div class="lbl">Return</div></div>
+      <div class="paper-box"><div class="num" id="paper-winrate">—</div><div class="lbl">Win Rate</div></div>
+    </div>
+    <div class="paper-breakdown" id="paper-breakdown">
+      <div class="paper-market">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Row Insights: SMC/FVG entry point recommendations -->
+<div class="grid row-logs" style="margin-bottom:14px">
+  <div class="card">
+    <div class="card-label">Entry Point Insight — Spot vs Derivative (read-only, tidak auto-eksekusi)</div>
+    <div class="insight-grid" id="insight-grid">
+      <div class="no-data">Waiting for SMC/FVG signals...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 3: Logs -->
+<div class="grid row-logs">
+  <div class="card">
+    <div class="card-label" style="display:flex;justify-content:space-between">
+      <span>Recent Logs</span>
+      <span id="log-count" style="color:var(--text-dim);font-size:10px"></span>
+    </div>
+    <div class="log-terminal" id="log-terminal">Loading logs...</div>
+  </div>
+</div>
+
+<script>
+const POLL_MS = 5000;
+let firstLoad = true;
+
+const REGIME_STYLES = {
+  HIGH_STRESS_TURBULENT: { cls: 'regime-turbulent', label: 'TURBULENT', color: 'var(--red)',   big: '⛔ TURBULENT', sub: 'High risk — Bear veto active' },
+  NORMAL:                { cls: 'regime-normal',    label: 'NORMAL',    color: 'var(--green)', big: '✅ NORMAL',    sub: 'Normal market conditions' },
+  LOW_VOLATILITY:        { cls: 'regime-low',       label: 'LOW VOL',   color: 'var(--blue)',  big: '📉 LOW VOL',   sub: 'Low volatility environment' },
+};
+
+function fmt(val) {
+  if (val === null || val === undefined) return 'N/A';
+  const n = parseFloat(val);
+  return (n >= 0 ? '+' : '') + n.toFixed(4);
+}
+
+function renderRegime(regime, bear_veto) {
+  const r = REGIME_STYLES[regime] || { cls: 'regime-unknown', label: regime || 'UNKNOWN', color: 'var(--text-dim)', big: regime || '—', sub: 'Detecting...' };
+  const badge = document.getElementById('regime-badge');
+  badge.className = 'regime-badge ' + r.cls;
+  badge.textContent = '● ' + r.label;
+
+  document.getElementById('regime-big').textContent = r.big;
+  document.getElementById('regime-big').style.color = r.color;
+  document.getElementById('regime-sub').textContent = r.sub;
+
+  const dot = document.getElementById('veto-dot');
+  const lbl = document.getElementById('veto-label');
+  if (bear_veto === true) {
+    dot.className = 'veto-dot active';
+    dot.textContent = '🛡';
+    lbl.className = 'veto-label active';
+    lbl.textContent = 'ACTIVE — No trades';
+  } else if (bear_veto === false) {
+    dot.className = 'veto-dot inactive';
+    dot.textContent = '✓';
+    lbl.className = 'veto-label inactive';
+    lbl.textContent = 'INACTIVE — Trading on';
+  } else {
+    dot.className = 'veto-dot';
+    dot.textContent = '?';
+    lbl.className = 'veto-label';
+    lbl.textContent = 'UNKNOWN';
+  }
+}
+
+function renderSignals(signals) {
+  const el = document.getElementById('signal-list');
+  if (!signals || Object.keys(signals).length === 0) {
+    el.innerHTML = '<div class="no-data">No signals yet</div>';
+    return;
+  }
+  const ORDER = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT'];
+  const names = ORDER.filter(s => s in signals).concat(Object.keys(signals).filter(s => !ORDER.includes(s)));
+  el.innerHTML = names.map(sym => {
+    const v = signals[sym];
+    const pct = Math.abs(v) * 50; // max fill = 50% each side
+    const cls = v > 0.01 ? 'pos' : v < -0.01 ? 'neg' : 'zero';
+    const valCls = cls;
+    const shortSym = sym.replace('USDT','').padEnd(3);
+    return `<div class="signal-row">
+      <span class="signal-symbol">${shortSym}/USDT</span>
+      <div class="signal-track">
+        <div class="signal-center"></div>
+        <div class="signal-fill ${cls}" style="width:${pct}%"></div>
+      </div>
+      <span class="signal-value ${valCls}">${fmt(v)}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderGraph(graph) {
+  if (!graph) return;
+  document.getElementById('total-nodes').textContent = graph.total_nodes ?? '—';
+  document.getElementById('total-edges').textContent = graph.total_edges ?? '—';
+
+  const edgeRows = document.getElementById('edge-rows');
+  if (!graph.edges || Object.keys(graph.edges).length === 0) {
+    edgeRows.innerHTML = '<div class="no-data">No edges yet</div>';
+    return;
+  }
+  edgeRows.innerHTML = Object.entries(graph.edges)
+    .sort((a,b) => b[1]-a[1])
+    .map(([rel, cnt]) => `<div class="edge-row">
+      <span class="edge-type">${rel}</span>
+      <span class="edge-count">${cnt}</span>
+    </div>`).join('');
+}
+
+function renderTrades(trades) {
+  const el = document.getElementById('trade-area');
+  if (!trades || trades.length === 0) {
+    el.innerHTML = '<div class="no-data" style="padding-top:30px">No trades yet — system accumulating data</div>';
+    return;
+  }
+  el.innerHTML = `<table class="trade-table">
+    <thead><tr>
+      <th>Symbol</th><th>Dir</th><th>PnL</th><th>Outcome</th>
+    </tr></thead>
+    <tbody>${trades.map(t => {
+      const pnl = t.pnl_pct ? (t.pnl_pct*100).toFixed(2)+'%' : '—';
+      const cls = t.outcome === 'win' ? 'pnl-win' : t.outcome === 'loss' ? 'pnl-loss' : '';
+      return `<tr>
+        <td>${t.symbol||'—'}</td>
+        <td>${t.direction||'—'}</td>
+        <td class="${cls}">${pnl}</td>
+        <td>${t.outcome||'—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+}
+
+function renderPaperTrading(pt) {
+  if (!pt) {
+    document.getElementById('paper-breakdown').innerHTML = '<div class="paper-market">Paper trading disabled</div>';
+    return;
+  }
+  const returnCls = pt.total_return_pct > 0 ? 'paper-num-pos' : pt.total_return_pct < 0 ? 'paper-num-neg' : '';
+  document.getElementById('paper-balance').textContent = '$' + pt.balance.toLocaleString(undefined, {maximumFractionDigits: 0});
+  const returnEl = document.getElementById('paper-return');
+  returnEl.textContent = (pt.total_return_pct >= 0 ? '+' : '') + pt.total_return_pct.toFixed(2) + '%';
+  returnEl.className = 'num ' + returnCls;
+  const wr = pt.overall.win_rate_pct;
+  document.getElementById('paper-winrate').textContent = wr === null ? '—' : wr.toFixed(1) + '%';
+
+  const mkt = (label, b) => `<div class="paper-market">
+    <div class="mkt-title">${label}</div>
+    <div>Trades: ${b.trades} (${b.wins}W / ${b.losses}L)</div>
+    <div>Win rate: ${b.win_rate_pct === null ? '—' : b.win_rate_pct.toFixed(1) + '%'}</div>
+    <div>PnL: ${b.total_pnl_dollars >= 0 ? '+' : ''}$${b.total_pnl_dollars.toFixed(2)}</div>
+  </div>`;
+  document.getElementById('paper-breakdown').innerHTML =
+    mkt('Spot', pt.spot) + mkt('Derivative', pt.derivative) +
+    `<div class="paper-market"><div class="mkt-title">Open</div><div>${pt.open_positions} position(s)</div></div>`;
+}
+
+function fmtPrice(v) {
+  if (v === null || v === undefined) return '—';
+  return parseFloat(v).toFixed(4);
+}
+
+function fmtZone(zone) {
+  if (!zone || zone.length !== 2) return '—';
+  return `${fmtPrice(zone[0])} – ${fmtPrice(zone[1])}`;
+}
+
+function renderInsightSide(block, kind) {
+  if (!block) return '<div class="no-data">—</div>';
+  const dir = block.direction || 'neutral';
+  const inactiveCls = block.actionable ? '' : ' insight-inactive';
+  let extra = '';
+  if (kind === 'derivative' && block.suggested_leverage) {
+    extra = `<div>Leverage: ${block.suggested_leverage}x</div><div>Est. liquidation: ${fmtPrice(block.est_liquidation)}</div>`;
+  }
+  return `<div class="${inactiveCls.trim()}">
+    <span class="insight-dir ${dir}">${dir.toUpperCase()}</span>
+    <div class="insight-detail">
+      <div>Entry: ${fmtZone(block.entry_zone)}</div>
+      <div>SL: ${fmtPrice(block.stop_loss)} | TP: ${fmtPrice(block.target)}</div>
+      ${extra}
+    </div>
+    <div class="insight-note">${block.note || ''}</div>
+  </div>`;
+}
+
+function renderEntryInsights(insights) {
+  const el = document.getElementById('insight-grid');
+  if (!insights || Object.keys(insights).length === 0) {
+    el.innerHTML = '<div class="no-data">Waiting for SMC/FVG signals...</div>';
+    return;
+  }
+  el.innerHTML = Object.values(insights).map(ins => `
+    <div class="insight-row">
+      <div>
+        <div class="insight-symbol">${ins.symbol}</div>
+        <div class="insight-structure">${ins.market_structure || 'unknown'}</div>
+      </div>
+      <div>
+        <div class="insight-col-label">Spot</div>
+        ${renderInsightSide(ins.spot, 'spot')}
+      </div>
+      <div>
+        <div class="insight-col-label">Derivative</div>
+        ${renderInsightSide(ins.derivative, 'derivative')}
+      </div>
+    </div>
+  `).join('');
+}
+
+function parseLine(raw) {
+  // Format: "2026-06-22 23:20:34,078 [INFO] module: message"
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ \[(\w+)\] ([^:]+): (.+)$/);
+  if (!m) return `<span class="log-line"><span style="color:var(--text-dim)">${raw}</span></span>`;
+  const [,ts,level,src,msg] = m;
+  const lvCls = level === 'WARNING' ? 'warning' : level === 'ERROR' ? 'error' : 'info';
+  const time = ts.split(' ')[1];
+  return `<span class="log-line ${lvCls}"><span class="log-ts">${time}</span><span class="lv">[${level.slice(0,4)}]</span> <span class="log-src">${src.split('.').pop()}:</span>${msg}</span>`;
+}
+
+function renderLogs(logs) {
+  const el = document.getElementById('log-terminal');
+  if (!logs || logs.length === 0) {
+    el.innerHTML = '<span style="color:var(--text-dim)">No log data</span>';
+    return;
+  }
+  document.getElementById('log-count').textContent = `${logs.length} lines`;
+  el.innerHTML = logs.map(parseLine).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+
+    document.getElementById('error-banner').style.display = 'none';
+    document.getElementById('pulse').className = 'pulse';
+
+    const ts = data.timestamp
+      ? new Date(data.timestamp + 'Z').toLocaleTimeString()
+      : 'unknown';
+    document.getElementById('last-update').textContent = `Updated ${ts} UTC+0`;
+
+    renderRegime(data.regime, data.bear_veto);
+    renderSignals(data.gnn_signals);
+    renderGraph(data.graph);
+    renderTrades(data.graph?.recent_trades);
+    renderEntryInsights(data.entry_insights);
+    renderPaperTrading(data.paper_trading);
+    renderLogs(data.recent_logs);
+
+    firstLoad = false;
+  } catch(e) {
+    document.getElementById('error-banner').style.display = 'block';
+    document.getElementById('pulse').className = 'pulse inactive';
+    document.getElementById('last-update').textContent = 'Connection failed';
+    console.error(e);
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
