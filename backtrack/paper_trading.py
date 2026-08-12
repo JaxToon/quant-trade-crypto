@@ -79,6 +79,12 @@ class PaperTradingLedger:
 
     def _load(self) -> None:
         if not os.path.exists(self.path):
+            logger.warning(
+                "No paper ledger found at %s — starting fresh from $%.2f. "
+                "If you expected prior history to carry over, check that this "
+                "path is on a persistent volume (see DEPLOYMENT.md).",
+                self.path, self.starting_balance,
+            )
             return
         try:
             with open(self.path) as f:
@@ -90,6 +96,10 @@ class PaperTradingLedger:
                 (p["symbol"], p["market"]): PaperPosition(**{k: v for k, v in p.items()})
                 for p in data.get("open_positions", [])
             }
+            logger.info(
+                "Paper ledger restored from %s — balance=$%.2f, %d closed trades, %d open.",
+                self.path, self.balance, len(self.closed_trades), len(self.open_positions),
+            )
         except Exception as exc:
             logger.warning("Paper ledger load failed, starting fresh: %s", exc)
 
