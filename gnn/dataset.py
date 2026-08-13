@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 from torch_geometric.data import HeteroData
 
+from config import settings
 from graph.neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -61,17 +62,25 @@ def _encode_market_structure(ms: str) -> float:
         return 0.0
 
 
-def build_hetero_data() -> tuple[HeteroData, dict[str, dict]]:
+def build_hetero_data(asset_type: str | None = None) -> tuple[HeteroData, dict[str, dict]]:
     """
     Queries Neo4j and builds a HeteroData graph.
     Returns (data, index_maps) where index_maps maps node_type → {id → int_index}.
+
+    asset_type: defaults to settings.ASSET_TYPE — the GNN is trained and run
+    separately per asset class (crypto vs stock), so by default only that
+    class's Token nodes are pulled in. Edges/Protocol/Macro_Event nodes
+    connected only to the other asset class are naturally excluded too, since
+    any edge referencing a filtered-out token gets skipped below (its index
+    lookup misses and the edge is dropped).
     """
+    asset_type = asset_type or settings.ASSET_TYPE
     client = Neo4jClient.get()
     data = HeteroData()
     index_maps: dict[str, dict] = {nt: {} for nt in NODE_TYPES}
 
     # ── Token nodes ────────────────────────────────────────────────────────
-    tokens = client.get_all_tokens()
+    tokens = client.get_all_tokens(asset_type=asset_type)
     token_feats = []
     for i, row in enumerate(tokens):
         node = dict(row["t"])

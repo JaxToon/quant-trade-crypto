@@ -71,13 +71,18 @@ class GNNTrainer:
 
     def save(self, path: str | None = None) -> str:
         os.makedirs(settings.MODEL_CHECKPOINT_DIR, exist_ok=True)
-        path = path or os.path.join(settings.MODEL_CHECKPOINT_DIR, "hgt_latest.pt")
+        path = path or os.path.join(settings.MODEL_CHECKPOINT_DIR, f"hgt_latest_{settings.ASSET_TYPE}.pt")
         torch.save(self.model.state_dict(), path)
         logger.info("Model saved to %s", path)
         return path
 
     def load(self, path: str | None = None) -> bool:
-        path = path or os.path.join(settings.MODEL_CHECKPOINT_DIR, "hgt_latest.pt")
+        # Crypto and stock get separate checkpoints — each is trained on a
+        # disjoint Token set (see gnn/dataset.build_hetero_data), so sharing
+        # one checkpoint between them would silently apply crypto-learned
+        # weights to stock inputs (or vice versa) with no error, just
+        # meaningless predictions.
+        path = path or os.path.join(settings.MODEL_CHECKPOINT_DIR, f"hgt_latest_{settings.ASSET_TYPE}.pt")
         if not os.path.exists(path):
             return False
         if self.model is None:

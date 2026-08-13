@@ -6,16 +6,43 @@ redeploy, and what's safe to lose?**
 
 ## What MUST persist (the model's accumulated learning)
 
+Crypto and stock are two entirely separate models — see "Crypto vs stock"
+below. Every path in this table is suffixed with the active `ASSET_TYPE`
+(`crypto` or `stock`) for exactly that reason.
+
 | Path | What it is | Lost if not persisted |
 |---|---|---|
-| `model_checkpoints/hgt_latest.pt` | GNN weights — bootstrapped by `train_gnn.py`, then fine-tuned automatically every `LEARNING_INTERVAL_HOURS` by `main.py`'s scheduled paper-trade learning job | All GNN training, including everything it's learned from live paper-trade outcomes since bootstrap |
-| `model_checkpoints/hmm_regime.pkl` | HMM regime detector, fit once from 60 days of history | Regime detection falls back to refitting on next start (slow, not catastrophic) |
-| `backtrack_logs/paper_ledger.json` | Live paper-trading ledger: balance, every closed trade, win rate, and `last_learned_count` (the GNN learning job's bookmark) | The entire win-rate track record, and the GNN learning job would treat all history as new |
-| **Neo4j database itself** | All Token/Protocol/Macro_Event nodes and edges — the knowledge graph the GNN reads | Every relationship learned from news enrichment, LLM causal discovery, and the base seed graph |
+| `model_checkpoints/hgt_latest_<asset_type>.pt` | GNN weights — bootstrapped by `train_gnn.py`, then fine-tuned automatically every `LEARNING_INTERVAL_HOURS` by `main.py`'s scheduled paper-trade learning job | All GNN training for that asset class, including everything it's learned from live paper-trade outcomes since bootstrap |
+| `model_checkpoints/hmm_regime.pkl` | HMM regime detector, fit once from 60 days of history (shared across asset classes — regime detection reads Binance BTC data regardless of `ASSET_TYPE`) | Regime detection falls back to refitting on next start (slow, not catastrophic) |
+| `backtrack_logs/paper_ledger_<asset_type>.json` | Live paper-trading ledger for that asset class: balance, every closed trade, win rate, and `last_learned_count` (the GNN learning job's bookmark) | That asset class's entire win-rate track record, and its GNN learning job would treat all history as new |
+| **Neo4j database itself** | All Token/Protocol/Macro_Event nodes and edges — the knowledge graph the GNN reads. Crypto and stock Token nodes coexist in the same database, distinguished by an `asset_type` property (see below) | Every relationship learned from news enrichment, LLM causal discovery, and the base seed graph, for both asset classes |
 
 `backtest_ledger*.json` and `dashboard/status.json` are **not** in this list —
 they're regenerated from scratch each run and aren't part of what the system
 has "learned."
+
+## Crypto vs stock: separate models, one graph
+
+Switching `.env`'s `ASSET_TYPE` between `crypto` and `stock` does NOT share
+learning between them — each gets its own GNN checkpoint and paper ledger
+file (the `_<asset_type>` suffix above), and `gnn/dataset.build_hetero_data()`
+filters Neo4j `Token` nodes by `asset_type` before building the graph the GNN
+trains/predicts on. This is deliberate: a model trained on BTC/ETH price
+action has no business predicting AAPL, and vice versa — sharing one
+checkpoint between them would load without error but produce meaningless
+predictions, silently.
+
+Both asset classes' Token nodes live in the *same* Neo4j database — `graph/schema.py`
+seeds both crypto and stock tokens unconditionally, tagged with
+`asset_type: "crypto"` or `asset_type: "stock"`. Edges between two crypto
+tokens or two stock tokens work as normal; there's no meaningful edge type
+connecting a crypto token to a stock token yet, so the two subgraphs are
+disjoint in practice even though they share a database.
+
+To train the stock model for the first time: `ASSET_TYPE=stock` in `.env`,
+then `python train_gnn.py` (it already knows to fetch `STOCK_WATCHLIST`
+tickers instead of crypto ones). `python backtest.py` and `python main.py`
+follow `ASSET_TYPE` the same way.
 
 ## What SHOULD persist (dashboard continuity, not model learning)
 

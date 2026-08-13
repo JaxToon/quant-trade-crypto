@@ -62,7 +62,9 @@ class PaperTradingLedger:
     """
 
     def __init__(self, path: str | None = None, starting_balance: float | None = None) -> None:
-        self.path = path or os.path.join(settings.BACKTRACK_LOG_DIR, "paper_ledger.json")
+        # Separate file per asset class — crypto and stock win rates are
+        # different markets and shouldn't be averaged into one stat.
+        self.path = path or os.path.join(settings.BACKTRACK_LOG_DIR, f"paper_ledger_{settings.ASSET_TYPE}.json")
         self.starting_balance = starting_balance if starting_balance is not None else settings.PAPER_TRADING_STARTING_BALANCE
         self.balance = self.starting_balance
         self.open_positions: dict[tuple[str, str], PaperPosition] = {}

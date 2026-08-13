@@ -20,8 +20,8 @@ against historical candles (the graph doesn't have historical state). This
 backtest measures pure SMC/FVG signal quality; the GNN confluence effect can
 only be evaluated going forward, via main.py's live paper trading.
 
-Uses a separate ledger file (backtrack_logs/backtest_ledger.json) so it
-never touches the live paper-trading ledger main.py maintains.
+Uses separate, asset-type-tagged ledger files (backtrack_logs/backtest_ledger_*_{crypto,stock}.json)
+so it never touches the live paper-trading ledger main.py maintains.
 
 Usage: python backtest.py [--days N]  (N is capped at 60 — Yahoo's 5m limit)
 """
@@ -45,7 +45,7 @@ YF_MAX_DAYS_5M = 60  # Yahoo Finance's hard limit for 5-minute-interval history
 
 # Binance symbol -> yfinance ticker (kept in sync with train_gnn.py's map;
 # not imported from there directly to avoid pulling in torch/GNN at import time).
-SYMBOL_TICKERS = {
+CRYPTO_TICKERS = {
     "BTCUSDT": ["BTC-USD"],
     "ETHUSDT": ["ETH-USD"],
     "SOLUSDT": ["SOL-USD", "SOL1-USD"],
@@ -55,6 +55,8 @@ SYMBOL_TICKERS = {
     "AVAXUSDT": ["AVAX-USD"],
     "DOTUSDT": ["DOT-USD"],
 }
+STOCK_TICKERS = {sym: [sym] for sym in settings.STOCK_WATCHLIST}
+SYMBOL_TICKERS = STOCK_TICKERS if settings.ASSET_TYPE == "stock" else CRYPTO_TICKERS
 
 
 def fetch_candles(symbol: str, days: int) -> list[Candle]:
@@ -169,7 +171,8 @@ def main() -> None:
     if args.days > YF_MAX_DAYS_5M:
         print(f"Note: capping to {YF_MAX_DAYS_5M}d — Yahoo Finance doesn't serve 5m candles further back than that.\n")
 
-    print(f"Fetching {days}d of 5m candles across {len(settings.WATCHLIST)} symbols (via yfinance)...\n")
+    print(f"ASSET_TYPE={settings.ASSET_TYPE} — {len(settings.WATCHLIST)} symbols: {settings.WATCHLIST}")
+    print(f"Fetching {days}d of 5m candles (via yfinance)...\n")
 
     first_half: dict[str, list] = {}
     second_half: dict[str, list] = {}
@@ -184,8 +187,12 @@ def main() -> None:
         print(f"  {symbol}: {len(candles)} candles ({candles[0].timestamp} -> {candles[-1].timestamp})"
               f" — split at {candles[mid].timestamp}")
 
-    ledger_is, candles_is, open_is = run_replay(first_half, "backtrack_logs/backtest_ledger_insample.json")
-    ledger_oos, candles_oos, open_oos = run_replay(second_half, "backtrack_logs/backtest_ledger_oos.json")
+    ledger_is, candles_is, open_is = run_replay(
+        first_half, f"backtrack_logs/backtest_ledger_insample_{settings.ASSET_TYPE}.json"
+    )
+    ledger_oos, candles_oos, open_oos = run_replay(
+        second_half, f"backtrack_logs/backtest_ledger_oos_{settings.ASSET_TYPE}.json"
+    )
 
     print_report(f"IN-SAMPLE (first half, ~{days // 2}d)", ledger_is, candles_is, open_is)
     print_report(f"OUT-OF-SAMPLE (second half, ~{days - days // 2}d)", ledger_oos, candles_oos, open_oos)
@@ -204,7 +211,10 @@ def main() -> None:
     print("\nNote: pnl_dollars assumes each trade's $ risk is independent of every other")
     print("open position — it is NOT a realistic capital-constrained return projection.")
     print("Win rate is the number to trust here; the dollar figures are directional.")
-    print("\nFull trade logs: backtrack_logs/backtest_ledger_insample.json, backtest_ledger_oos.json")
+    print(
+        f"\nFull trade logs: backtrack_logs/backtest_ledger_insample_{settings.ASSET_TYPE}.json, "
+        f"backtest_ledger_oos_{settings.ASSET_TYPE}.json"
+    )
 
 
 if __name__ == "__main__":

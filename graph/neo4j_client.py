@@ -152,7 +152,10 @@ class Neo4jClient:
 
     # ── Graph reads for GNN feature extraction ────────────────────────────
 
-    def get_all_tokens(self) -> list[dict]:
+    def get_all_tokens(self, asset_type: str | None = None) -> list[dict]:
+        """asset_type filters to only crypto or stock tokens — pass None for all."""
+        if asset_type:
+            return self.run_read("MATCH (t:Token {asset_type: $asset_type}) RETURN t", asset_type=asset_type)
         return self.run_read("MATCH (t:Token) RETURN t")
 
     def get_neighbours(self, symbol: str, hops: int = 2) -> list[dict]:
