@@ -1,4 +1,4 @@
-# TraderStuff - Smart Money Trading System
+# Quant-Trade for blue chip stock and crypto
 
 Advanced quantitative trading system with **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, and **Blue Chip stock/crypto filtering**.
 
