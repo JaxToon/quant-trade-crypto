@@ -33,26 +33,34 @@ class IntegratedMarketStream:
             source: "binance", "tradingview", or "auto" (auto-detect from config)
         """
         self.source = self._determine_source(source)
-        self.smc_analyzers: dict[str, SmartMoneyAnalyzer] = {}
-        self.fvg_analyzers: dict[str, FairValueGapAnalyzer] = {}
+        # Keyed by (symbol, timeframe) — SMC/FVG runs independently per layer
+        # (BINANCE_SMC_TIMEFRAMES), since a 5m Order Block and a 1h Order Block
+        # at "the same" price level are different patterns with different
+        # stop distances. TradingView-sourced ticks (no `interval` tag) fall
+        # back to the primary timeframe — see _enrich_with_smc.
+        self.smc_analyzers: dict[tuple[str, str], SmartMoneyAnalyzer] = {}
+        self.fvg_analyzers: dict[tuple[str, str], FairValueGapAnalyzer] = {}
         self.candle_buffers: dict[str, list] = defaultdict(list)
         self._callbacks: list[Callable[[str, dict], None]] = []
 
-        # Initialize analyzers for each symbol
+        timeframes = settings.BINANCE_SMC_TIMEFRAMES if self.source == "binance" else [settings.TRADINGVIEW_INTERVAL]
+        self._timeframes = timeframes
         for symbol in settings.WATCHLIST:
-            self.smc_analyzers[symbol] = SmartMoneyAnalyzer(
-                lookback=settings.SMC_LOOKBACK_CANDLES
-            )
-            self.fvg_analyzers[symbol] = FairValueGapAnalyzer(
-                max_fvgs=50,
-                cluster_proximity=0.02
-            )
+            for tf in timeframes:
+                self.smc_analyzers[(symbol, tf)] = SmartMoneyAnalyzer(
+                    lookback=settings.SMC_LOOKBACK_CANDLES
+                )
+                self.fvg_analyzers[(symbol, tf)] = FairValueGapAnalyzer(
+                    max_fvgs=50,
+                    cluster_proximity=0.02
+                )
 
         logger.info(
-            "IntegratedMarketStream initialized: source=%s, SMC=%s, symbols=%s",
+            "IntegratedMarketStream initialized: source=%s, SMC=%s, symbols=%s, timeframes=%s",
             self.source,
             "enabled" if settings.SMC_ENABLED else "disabled",
-            len(settings.WATCHLIST)
+            len(settings.WATCHLIST),
+            timeframes,
         )
 
     def _determine_source(self, source: str) -> str:
@@ -83,7 +91,7 @@ class IntegratedMarketStream:
         """
         Warm up SMC/FVG state with recently closed candles via REST so entry
         insight isn't blank for the first `SMC_LOOKBACK_CANDLES` bars after
-        every restart (e.g. ~8 hours of dead air at the 5m default).
+        every restart — done once per (symbol, timeframe) layer.
         """
         try:
             from binance.client import Client as SyncClient
@@ -96,33 +104,33 @@ class IntegratedMarketStream:
             logger.warning("SMC backfill skipped: could not create Binance client (%s)", exc)
             return
 
-        interval = settings.BINANCE_KLINE_INTERVAL
         for symbol in settings.WATCHLIST:
-            try:
-                klines = client.get_klines(symbol=symbol, interval=interval, limit=settings.SMC_LOOKBACK_CANDLES)
-            except Exception as exc:
-                logger.warning("SMC backfill failed for %s: %s", symbol, exc)
-                continue
+            for tf in self._timeframes:
+                try:
+                    klines = client.get_klines(symbol=symbol, interval=tf, limit=settings.SMC_LOOKBACK_CANDLES)
+                except Exception as exc:
+                    logger.warning("SMC backfill failed for %s [%s]: %s", symbol, tf, exc)
+                    continue
 
-            analyzer = self.smc_analyzers[symbol]
-            fvg = self.fvg_analyzers[symbol]
-            for row in klines:
-                # kline row: [open_time, open, high, low, close, volume, close_time, ...]
-                candle = Candle(
-                    timestamp=datetime.utcfromtimestamp(row[0] / 1000),
-                    open=float(row[1]), high=float(row[2]), low=float(row[3]),
-                    close=float(row[4]), volume=float(row[5]),
-                )
-                analyzer.update(candle)
-                candles = list(analyzer.candles)
-                if len(candles) >= 3:
-                    fvg.detect_fvg(
-                        candles=candles, index=len(candles) - 2,
-                        current_price=candle.close, volume=candle.volume,
+                analyzer = self.smc_analyzers[(symbol, tf)]
+                fvg = self.fvg_analyzers[(symbol, tf)]
+                for row in klines:
+                    # kline row: [open_time, open, high, low, close, volume, close_time, ...]
+                    candle = Candle(
+                        timestamp=datetime.utcfromtimestamp(row[0] / 1000),
+                        open=float(row[1]), high=float(row[2]), low=float(row[3]),
+                        close=float(row[4]), volume=float(row[5]),
                     )
-            if analyzer.candles:
-                fvg.update_all(analyzer.candles[-1].close)
-            logger.info("SMC backfilled %s: %d x %s candles", symbol, len(klines), interval)
+                    analyzer.update(candle)
+                    candles = list(analyzer.candles)
+                    if len(candles) >= 3:
+                        fvg.detect_fvg(
+                            candles=candles, index=len(candles) - 2,
+                            current_price=candle.close, volume=candle.volume,
+                        )
+                if analyzer.candles:
+                    fvg.update_all(analyzer.candles[-1].close)
+                logger.info("SMC backfilled %s [%s]: %d candles", symbol, tf, len(klines))
 
     async def _start_binance_stream(self) -> None:
         """Start Binance WebSocket stream with SMC overlay."""
@@ -166,10 +174,22 @@ class IntegratedMarketStream:
 
     def _enrich_with_smc(self, symbol: str, market_data: dict) -> dict:
         """
-        Enrich market data with Smart Money Concept analysis.
+        Enrich market data with Smart Money Concept analysis, on whichever
+        timeframe layer this tick belongs to (market_data['interval'], tagged
+        by structured_stream.py; falls back to the primary timeframe for
+        sources — like TradingView — that don't tag an interval).
         Returns combined dict with technical indicators + SMC signals.
         """
         if not settings.SMC_ENABLED:
+            return market_data
+
+        tf = market_data.get('interval', settings.BINANCE_KLINE_INTERVAL)
+        key = (symbol, tf)
+        if key not in self.smc_analyzers:
+            # Unknown timeframe (shouldn't happen — every subscribed stream
+            # has a matching analyzer) — pass through unenriched rather than
+            # crash the whole tick pipeline over one bad tag.
+            logger.debug("No SMC analyzer for %s [%s], skipping enrichment", symbol, tf)
             return market_data
 
         try:
@@ -185,13 +205,16 @@ class IntegratedMarketStream:
             )
             is_closed = market_data.get('kline_closed', True)
 
+            smc = self.smc_analyzers[key]
+            fvg = self.fvg_analyzers[key]
+
             if is_closed:
                 # Candle finished — append to history and re-run pattern detection.
-                smc_signals = self.smc_analyzers[symbol].update(candle)
+                smc_signals = smc.update(candle)
 
-                candles = list(self.smc_analyzers[symbol].candles)
+                candles = list(smc.candles)
                 if len(candles) >= 3:
-                    self.fvg_analyzers[symbol].detect_fvg(
+                    fvg.detect_fvg(
                         candles=candles,
                         index=len(candles) - 2,  # Previous candle
                         current_price=candle.close,
@@ -200,14 +223,14 @@ class IntegratedMarketStream:
             else:
                 # Candle still forming — just re-check proximity to already
                 # detected zones against the live price, don't mutate history.
-                smc_signals = self.smc_analyzers[symbol].peek_signals(candle)
+                smc_signals = smc.peek_signals(candle)
 
             # Update all FVG mitigation % with the current live price
-            self.fvg_analyzers[symbol].update_all(candle.close)
+            fvg.update_all(candle.close)
 
             # Get FVG trading signal
             ms_trend = smc_signals.get('market_structure', 'unknown')
-            fvg_signal = self.fvg_analyzers[symbol].get_trading_signal(
+            fvg_signal = fvg.get_trading_signal(
                 current_price=candle.close,
                 trend=ms_trend
             )
@@ -216,6 +239,7 @@ class IntegratedMarketStream:
             smc_context = {
                 **smc_signals,
                 **fvg_signal,
+                'timeframe': tf,
                 'timestamp': datetime.utcnow().isoformat()
             }
 
@@ -226,29 +250,34 @@ class IntegratedMarketStream:
                 'smc_enabled': True
             }
 
-            # Log significant events
+            # Log significant events (tag the timeframe — otherwise a 5m and
+            # 1h Order Block on the same symbol are indistinguishable in logs)
             if smc_signals.get('in_bullish_ob'):
-                logger.info("%s: Price entered BULLISH Order Block", symbol)
+                logger.info("%s [%s]: Price entered BULLISH Order Block", symbol, tf)
             if smc_signals.get('in_bearish_ob'):
-                logger.info("%s: Price entered BEARISH Order Block", symbol)
+                logger.info("%s [%s]: Price entered BEARISH Order Block", symbol, tf)
             if fvg_signal.get('direction') != 'neutral':
                 logger.info(
-                    "%s: FVG signal %s (confidence=%.1f%%)",
-                    symbol,
+                    "%s [%s]: FVG signal %s (confidence=%.1f%%)",
+                    symbol, tf,
                     fvg_signal.get('direction'),
                     fvg_signal.get('confidence', 0)
                 )
 
-            # Update Neo4j with SMC metadata
-            try:
-                Neo4jClient.get().update_token_smc_data(symbol, smc_context)
-            except Exception as exc:
-                logger.warning("Neo4j SMC write failed for %s: %s", symbol, exc)
+            # Update Neo4j with SMC metadata — primary timeframe only, so the
+            # Token node's smc_* properties (which feed GNN features) stay
+            # consistent with one timeframe rather than flip-flopping between
+            # three concurrent streams.
+            if tf == settings.BINANCE_KLINE_INTERVAL:
+                try:
+                    Neo4jClient.get().update_token_smc_data(symbol, smc_context)
+                except Exception as exc:
+                    logger.warning("Neo4j SMC write failed for %s: %s", symbol, exc)
 
             return enriched
 
         except Exception as exc:
-            logger.error("SMC enrichment error for %s: %s", symbol, exc, exc_info=True)
+            logger.error("SMC enrichment error for %s [%s]: %s", symbol, tf, exc, exc_info=True)
             return {**market_data, 'smc_enabled': False, 'smc_error': str(exc)}
 
     def _fire_callbacks(self, symbol: str, enriched_data: dict) -> None:
@@ -263,16 +292,19 @@ class IntegratedMarketStream:
         """Stop the integrated stream."""
         logger.info("IntegratedMarketStream stopped")
 
-    def get_smc_summary(self, symbol: str) -> dict:
-        """Get current SMC state summary for a symbol."""
-        if symbol not in self.smc_analyzers:
+    def get_smc_summary(self, symbol: str, timeframe: str | None = None) -> dict:
+        """Get current SMC state summary for a symbol on one timeframe layer."""
+        tf = timeframe or settings.BINANCE_KLINE_INTERVAL
+        key = (symbol, tf)
+        if key not in self.smc_analyzers:
             return {}
 
-        smc = self.smc_analyzers[symbol]
-        fvg = self.fvg_analyzers[symbol]
+        smc = self.smc_analyzers[key]
+        fvg = self.fvg_analyzers[key]
 
         return {
             'symbol': symbol,
+            'timeframe': tf,
             'market_structure': smc.market_structure.trend if smc.market_structure else 'unknown',
             'active_order_blocks': len([ob for ob in smc.order_blocks if not ob.mitigated]),
             'active_fvgs': len([f for f in fvg.fvgs if not f.mitigated]),
@@ -281,5 +313,9 @@ class IntegratedMarketStream:
         }
 
     def get_all_summaries(self) -> dict[str, dict]:
-        """Get SMC summaries for all tracked symbols."""
-        return {symbol: self.get_smc_summary(symbol) for symbol in settings.WATCHLIST}
+        """Get SMC summaries for all tracked symbols/timeframes, keyed 'SYMBOL_tf'."""
+        return {
+            f"{symbol}_{tf}": self.get_smc_summary(symbol, tf)
+            for symbol in settings.WATCHLIST
+            for tf in self._timeframes
+        }

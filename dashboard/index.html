@@ -252,6 +252,10 @@
     align-items: start;
   }
   .insight-symbol { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; }
+  .insight-tf {
+    font-size: 9px; font-weight: 600; color: var(--text-dim); background: var(--bg-surface2);
+    padding: 1px 6px; border-radius: 8px; margin-left: 4px; letter-spacing: 0.3px;
+  }
   .insight-structure { font-size: 10px; color: var(--text-dim); margin-top: 3px; text-transform: capitalize; }
   .insight-col-label { font-size: 9px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
   .insight-dir { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; margin-bottom: 4px; }
@@ -420,6 +424,7 @@
     <div class="paper-breakdown" id="paper-breakdown">
       <div class="paper-market">Loading...</div>
     </div>
+    <div class="paper-breakdown" id="paper-breakdown-tf" style="margin-top:10px"></div>
   </div>
 </div>
 
@@ -672,6 +677,12 @@ function renderPaperTrading(pt) {
   document.getElementById('paper-breakdown').innerHTML =
     mkt('Spot', pt.spot) + mkt('Derivative', pt.derivative) +
     `<div class="paper-market"><div class="mkt-title">Open</div><div>${pt.open_positions} position(s)</div></div>`;
+
+  const byTf = pt.by_timeframe || {};
+  const tfKeys = Object.keys(byTf).sort((a, b) => TIMEFRAME_ORDER.indexOf(a) - TIMEFRAME_ORDER.indexOf(b));
+  document.getElementById('paper-breakdown-tf').innerHTML = tfKeys.length
+    ? tfKeys.map(tf => mkt(`Layer ${tf}`, byTf[tf])).join('')
+    : '';
 }
 
 function fmtPrice(v) {
@@ -707,6 +718,8 @@ function renderInsightSide(block, kind, rejectionReason) {
   </div>`;
 }
 
+const TIMEFRAME_ORDER = ['5m', '15m', '1h'];
+
 function renderEntryInsights(insights, rejections) {
   const el = document.getElementById('insight-grid');
   if (!insights || Object.keys(insights).length === 0) {
@@ -714,12 +727,18 @@ function renderEntryInsights(insights, rejections) {
     return;
   }
   rejections = rejections || {};
-  el.innerHTML = Object.values(insights).map(ins => {
-    const rej = rejections[ins.symbol] || {};
+  const keys = Object.keys(insights).sort((a, b) => {
+    const ia = insights[a], ib = insights[b];
+    if (ia.symbol !== ib.symbol) return ia.symbol.localeCompare(ib.symbol);
+    return TIMEFRAME_ORDER.indexOf(ia.timeframe) - TIMEFRAME_ORDER.indexOf(ib.timeframe);
+  });
+  el.innerHTML = keys.map(key => {
+    const ins = insights[key];
+    const rej = rejections[key] || {};
     return `
     <div class="insight-row">
       <div>
-        <div class="insight-symbol">${ins.symbol}</div>
+        <div class="insight-symbol">${ins.symbol} <span class="insight-tf">${ins.timeframe || ''}</span></div>
         <div class="insight-structure">${ins.market_structure || 'unknown'}</div>
       </div>
       <div>

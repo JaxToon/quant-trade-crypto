@@ -103,6 +103,15 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # tick-level data here degenerates every "candle" to open==high==low==close.
 BINANCE_KLINE_INTERVAL = os.getenv("BINANCE_KLINE_INTERVAL", "5m")
 
+# SMC/FVG runs independently on each of these timeframes ("layers"), not just
+# the primary one above. Why: FVG gap size scales with candle range, so a 5m
+# gap is often too tight to clear PAPER_TRADING's fee-viability stop floor
+# (measured live: 0.09-0.27% vs a 0.67% minimum) — a 1h gap on the same
+# symbol is naturally wider in %, and clears that bar far more often, without
+# loosening the fee-viability filter itself. Technical indicators (RSI/MACD/BB)
+# still only run on the first/primary entry — see structured_stream.py.
+BINANCE_SMC_TIMEFRAMES = [BINANCE_KLINE_INTERVAL, "15m", "1h"]
+
 # Order Block settings
 OB_MIN_STRENGTH = 30.0  # Minimum strength score (0-100) to consider valid
 OB_MAX_AGE_HOURS = 168  # 1 week max age
@@ -146,8 +155,16 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8080"))
 # ── Paper trading (scores entry_insight recommendations, no real orders) ──
 PAPER_TRADING_ENABLED = os.getenv("PAPER_TRADING_ENABLED", "true").lower() == "true"
 PAPER_TRADING_STARTING_BALANCE = float(os.getenv("PAPER_TRADING_STARTING_BALANCE", "10000"))
-PAPER_TRADING_RISK_PCT = 0.02  # risk 2% of current paper balance per simulated trade
+PAPER_TRADING_RISK_PCT = 0.02  # base risk unit: 2% of STARTING balance per simulated trade
 PAPER_TRADING_FEE_PCT = 0.001  # 0.1% per side (0.2% round trip) — Binance spot taker fee, no BNB discount
+
+# Reward higher-conviction signals with a bigger (but still bounded) bet:
+# risk scales linearly from 1x the base unit at confidence=0 up to this
+# multiplier at confidence=100. Deliberately NOT allowed to reach anything
+# like real "125x leverage" territory — at this system's own 0.67% minimum
+# stop distance, 125x-scaled risk would put the liquidation buffer inside
+# normal price noise, guaranteeing stop-outs before the plan ever executes.
+PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER = 2.5
 
 # ── Historical backtest (backtest.py) ──────────────────────────────────────
 BACKTEST_DAYS = int(os.getenv("BACKTEST_DAYS", "30"))

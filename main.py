@@ -65,7 +65,10 @@ from strategy.entry_insight import build_entry_insight
 from strategy.execution import ExecutionEngine
 
 # ── Shared state ──────────────────────────────────────────────────────────
-_latest_indicators: dict[str, dict] = {}
+# Keyed by (symbol, timeframe) — SMC/FVG runs independently per layer
+# (settings.BINANCE_SMC_TIMEFRAMES), so ticks from 5m/15m/1h streams for the
+# same symbol must not overwrite each other under one key.
+_latest_indicators: dict[tuple[str, str], dict] = {}
 _shutdown = threading.Event()
 _paper_ledger = PaperTradingLedger() if settings.PAPER_TRADING_ENABLED else None
 
@@ -116,15 +119,18 @@ def _validate_config() -> None:
 # ── Decision loop (runs every 60 seconds) ────────────────────────────────
 
 def _build_entry_insights(gnn_signals: dict) -> dict:
+    """Returns {"SYMBOL_timeframe": insight} — one entry per (symbol, layer)."""
     insights = {}
-    for symbol, indicators in _latest_indicators.items():
+    for (symbol, tf), indicators in _latest_indicators.items():
         try:
             price = indicators.get("price", 0.0)
-            insights[symbol] = build_entry_insight(
+            insight = build_entry_insight(
                 symbol, price, indicators.get("smc"), gnn_signals.get(symbol, 0.0)
             )
+            insight["timeframe"] = tf
+            insights[f"{symbol}_{tf}"] = insight
         except Exception as exc:
-            logger.debug("Entry insight failed for %s: %s", symbol, exc)
+            logger.debug("Entry insight failed for %s [%s]: %s", symbol, tf, exc)
     return insights
 
 
@@ -134,25 +140,31 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
     account — opens simulated positions on actionable insights, closes them
     on SL/TP cross. No real or testnet orders are placed here.
 
-    Returns {symbol: {"spot": reason, "derivative": reason}} for any insight
-    that said "actionable" but the ledger rejected anyway — so a rejection
-    like "stop too tight for fees" is visible on the dashboard instead of
-    silently invisible (it used to only log at debug level, which the
-    default INFO config never shows).
+    insights: keyed "SYMBOL_timeframe" (see _build_entry_insights) — each
+    layer gets its own independent paper position, so e.g. a 5m and a 1h
+    derivative signal on the same symbol can both be open at once.
+
+    Returns {"SYMBOL_timeframe": {"spot": reason, "derivative": reason}} for
+    any insight that said "actionable" but the ledger rejected anyway — so a
+    rejection like "stop too tight for fees" is visible on the dashboard
+    instead of silently invisible (it used to only log at debug level, which
+    the default INFO config never shows).
     """
     rejections: dict[str, dict] = {}
     if _paper_ledger is None:
         return rejections
     try:
-        for symbol, ins in insights.items():
+        for insight_key, ins in insights.items():
+            symbol = ins.get("symbol", insight_key)
+            tf = ins.get("timeframe", settings.BINANCE_KLINE_INTERVAL)
             # confidence lives on the parent insight dict, not the spot/
             # derivative sub-blocks — carry it along so the ledger records it.
             spot = {**ins.get("spot", {}), "confidence": ins.get("confidence", 0.0)}
             derivative = {**ins.get("derivative", {}), "confidence": ins.get("confidence", 0.0)}
-            spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot)
-            deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative)
+            spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot, timeframe=tf)
+            deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf)
             if spot_reason or deriv_reason:
-                rejections[symbol] = {"spot": spot_reason, "derivative": deriv_reason}
+                rejections[insight_key] = {"spot": spot_reason, "derivative": deriv_reason}
 
         _paper_ledger.check_and_close(prices)
         _paper_ledger.save()
@@ -176,12 +188,25 @@ def _record_history(prices: dict) -> None:
         logger.debug("Session history save failed: %s", exc)
 
 
+def _current_prices() -> dict:
+    """One representative price per symbol, preferring the primary timeframe
+    when available (any layer's price is close enough for display/closing
+    purposes — they're all the same live market, just different candle
+    granularity)."""
+    prices: dict[str, float] = {}
+    for (sym, tf), ind in _latest_indicators.items():
+        price = ind.get("price")
+        if not price:
+            continue
+        if sym not in prices or tf == settings.BINANCE_KLINE_INTERVAL:
+            prices[sym] = price
+    return prices
+
+
 def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
     try:
         insights = _build_entry_insights(signals)
-        prices = {
-            sym: ind.get("price") for sym, ind in _latest_indicators.items() if ind.get("price")
-        }
+        prices = _current_prices()
         paper_trade_rejections = _run_paper_trading(insights, prices)
         _record_history(prices)
         payload = {
@@ -222,7 +247,10 @@ def decision_loop(
         return
 
     for symbol in settings.WATCHLIST:
-        indicators = _latest_indicators.get(symbol, {})
+        # LLM-consensus execution stays on the primary timeframe only — the
+        # multi-timeframe layers (15m/1h) feed entry_insight/paper trading,
+        # not this real-testnet-order path, which shouldn't change behavior.
+        indicators = _latest_indicators.get((symbol, settings.BINANCE_KLINE_INTERVAL), {})
         if not indicators:
             logger.debug("%s: no indicators yet, skipping.", symbol)
             continue
@@ -254,7 +282,8 @@ def decision_loop(
 # ── Binance tick callback ─────────────────────────────────────────────────
 
 def on_tick(symbol: str, indicators: dict) -> None:
-    _latest_indicators[symbol] = indicators
+    tf = indicators.get("interval", settings.BINANCE_KLINE_INTERVAL)
+    _latest_indicators[(symbol, tf)] = indicators
 
 
 def _start_dashboard() -> None:

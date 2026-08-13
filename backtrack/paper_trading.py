@@ -52,6 +52,7 @@ class PaperPosition:
     quantity: float
     leverage: float
     confidence: float
+    timeframe: str = "5m"  # which SMC/FVG layer this signal came from
     opened_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -67,7 +68,7 @@ class PaperTradingLedger:
         self.path = path or os.path.join(settings.BACKTRACK_LOG_DIR, f"paper_ledger_{settings.ASSET_TYPE}.json")
         self.starting_balance = starting_balance if starting_balance is not None else settings.PAPER_TRADING_STARTING_BALANCE
         self.balance = self.starting_balance
-        self.open_positions: dict[tuple[str, str], PaperPosition] = {}
+        self.open_positions: dict[tuple[str, str, str], PaperPosition] = {}
         self.closed_trades: list[dict] = []
         self.last_learned_count = 0  # index into closed_trades already used for GNN updates
         # Live use (main.py, running for weeks/months) needs a cap so the
@@ -95,7 +96,7 @@ class PaperTradingLedger:
             self.closed_trades = data.get("closed_trades", [])
             self.last_learned_count = data.get("last_learned_count", 0)
             self.open_positions = {
-                (p["symbol"], p["market"]): PaperPosition(**{k: v for k, v in p.items()})
+                (p["symbol"], p["market"], p.get("timeframe", "5m")): PaperPosition(**{k: v for k, v in p.items()})
                 for p in data.get("open_positions", [])
             }
             logger.info(
@@ -122,16 +123,19 @@ class PaperTradingLedger:
 
     # ── Trading ────────────────────────────────────────────────────────────
 
-    def maybe_open(self, symbol: str, market: str, rec: dict) -> str | None:
+    def maybe_open(self, symbol: str, market: str, rec: dict, timeframe: str = "5m") -> str | None:
         """
         rec: a `spot` or `derivative` block from entry_insight.build_entry_insight.
+        timeframe: which SMC/FVG layer this signal came from (e.g. "5m",
+        "15m", "1h") — kept as a separate position key so the same symbol
+        can have independent open positions per layer simultaneously.
 
         Returns None if a position was opened, or if there was nothing to do
         (no signal, already open). Returns a short human-readable reason if
         entry_insight says "actionable" but this ledger rejected it anyway —
         surfaced to the dashboard so a rejection is never silently invisible.
         """
-        key = (symbol, market)
+        key = (symbol, market, timeframe)
         if key in self.open_positions:
             return None
         if not rec.get("actionable"):
@@ -159,7 +163,16 @@ class PaperTradingLedger:
         # geometrically into meaningless numbers. Sizing off a fixed risk
         # unit keeps the PnL curve roughly linear and interpretable, which
         # is what "what's the win rate" actually needs.
-        risk_amount = self.starting_balance * settings.PAPER_TRADING_RISK_PCT
+        #
+        # Conviction scaling: a confidence=0 signal risks 1x the base unit;
+        # confidence=100 risks up to PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER.
+        # This is the "reward bolder calls" lever — bounded on purpose (see
+        # settings.py) rather than a literal leverage multiplier.
+        confidence = max(0.0, min(100.0, rec.get("confidence", 0.0)))
+        max_mult = settings.PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER
+        conviction_multiplier = 1.0 + (confidence / 100.0) * (max_mult - 1.0)
+
+        risk_amount = self.starting_balance * settings.PAPER_TRADING_RISK_PCT * conviction_multiplier
         quantity = risk_amount / stop_distance
 
         # Hard cap regardless — a tight-but-not-rejected stop combined with
@@ -178,11 +191,13 @@ class PaperTradingLedger:
             quantity=quantity,
             leverage=rec.get("suggested_leverage", 1),
             confidence=rec.get("confidence", 0.0),
+            timeframe=timeframe,
         )
         self.open_positions[key] = pos
         logger.info(
-            "PAPER OPEN %s %s %s @ %.6f | SL=%.6f TP=%.6f qty=%.4f",
-            market, pos.direction.upper(), symbol, entry_price, stop_loss, target, quantity,
+            "PAPER OPEN %s %s %s [%s] @ %.6f | SL=%.6f TP=%.6f qty=%.4f | conviction=%.2fx (confidence=%.0f%%)",
+            market, pos.direction.upper(), symbol, timeframe, entry_price, stop_loss, target, quantity,
+            conviction_multiplier, confidence,
         )
         return None
 
@@ -202,30 +217,35 @@ class PaperTradingLedger:
                 exit_price = pos.stop_loss if hit_sl else pos.target
                 self._close(key, pos, exit_price, "loss" if hit_sl else "win", closed_at=None)
 
-    def check_and_close_ohlc(self, symbol: str, low: float, high: float, closed_at: str) -> None:
+    def check_and_close_ohlc(self, symbol: str, low: float, high: float, closed_at: str, timeframe: str | None = None) -> None:
         """
         Backtest mode: check a position against a full candle's [low, high]
         range instead of a single price, since intrabar price action isn't
         known from OHLC alone. If both SL and TP fall inside the same
         candle's range, conservatively assume SL was hit first — avoids an
         optimistic look-ahead bias in the backtested win rate.
+
+        timeframe: restrict the check to one layer's open positions (a 15m
+        candle shouldn't resolve a 1h position). None checks every layer —
+        fine for single-timeframe backtests where only one layer is ever open.
         """
         for market in ("spot", "derivative"):
-            key = (symbol, market)
-            pos = self.open_positions.get(key)
-            if pos is None:
-                continue
+            for key, pos in list(self.open_positions.items()):
+                if pos.symbol != symbol or pos.market != market:
+                    continue
+                if timeframe is not None and pos.timeframe != timeframe:
+                    continue
 
-            if pos.direction == "long":
-                hit_sl, hit_tp = low <= pos.stop_loss, high >= pos.target
-            else:  # short
-                hit_sl, hit_tp = high >= pos.stop_loss, low <= pos.target
+                if pos.direction == "long":
+                    hit_sl, hit_tp = low <= pos.stop_loss, high >= pos.target
+                else:  # short
+                    hit_sl, hit_tp = high >= pos.stop_loss, low <= pos.target
 
-            if hit_sl or hit_tp:
-                exit_price = pos.stop_loss if hit_sl else pos.target
-                self._close(key, pos, exit_price, "loss" if hit_sl else "win", closed_at=closed_at)
+                if hit_sl or hit_tp:
+                    exit_price = pos.stop_loss if hit_sl else pos.target
+                    self._close(key, pos, exit_price, "loss" if hit_sl else "win", closed_at=closed_at)
 
-    def _close(self, key: tuple[str, str], pos: PaperPosition, exit_price: float, outcome: str, closed_at: str | None) -> None:
+    def _close(self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str, closed_at: str | None) -> None:
         sign = 1 if pos.direction == "long" else -1
         gross_pnl_dollars = pos.quantity * (exit_price - pos.entry_price) * sign
         # Round-trip fee on both entry and exit notional — "win" / "loss"
@@ -238,6 +258,7 @@ class PaperTradingLedger:
         self.balance += pnl_dollars
         self.closed_trades.append({
             "symbol": pos.symbol, "market": pos.market, "direction": pos.direction,
+            "timeframe": pos.timeframe,
             "entry_price": pos.entry_price, "exit_price": exit_price,
             "pnl_dollars": round(pnl_dollars, 4), "pnl_pct": round(pnl_pct, 4),
             "fee_dollars": round(fee_dollars, 4),
@@ -283,6 +304,14 @@ class PaperTradingLedger:
         spot_trades = [t for t in self.closed_trades if t["market"] == "spot"]
         deriv_trades = [t for t in self.closed_trades if t["market"] == "derivative"]
 
+        # Per-timeframe breakdown — the whole point of layering 5m/15m/1h is
+        # to see which layer actually produces a fee-viable, positive edge.
+        timeframes = sorted({t.get("timeframe", "5m") for t in self.closed_trades})
+        by_timeframe = {
+            tf: _breakdown([t for t in self.closed_trades if t.get("timeframe", "5m") == tf])
+            for tf in timeframes
+        }
+
         return {
             "starting_balance": self.starting_balance,
             "balance": round(self.balance, 2),
@@ -291,4 +320,5 @@ class PaperTradingLedger:
             "overall": _breakdown(self.closed_trades),
             "spot": _breakdown(spot_trades),
             "derivative": _breakdown(deriv_trades),
+            "by_timeframe": by_timeframe,
         }
