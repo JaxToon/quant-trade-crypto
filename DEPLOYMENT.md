@@ -17,10 +17,22 @@ redeploy, and what's safe to lose?**
 they're regenerated from scratch each run and aren't part of what the system
 has "learned."
 
+## What SHOULD persist (dashboard continuity, not model learning)
+
+| Path | What it is | Lost if not persisted |
+|---|---|---|
+| `dashboard/history.json` | Rolling window (~3.5 days at the 60s decision-loop cadence) feeding the dashboard's equity-curve and price-movement charts | Charts reset to blank on every restart instead of showing continuity across runs — cosmetic only, doesn't affect the GNN or trading decisions |
+
+This is a separate category on purpose: it makes the dashboard *feel*
+continuous across restarts, but the model doesn't read it for anything. If
+you're deploying under real storage constraints and have to choose, the
+table above (checkpoints, ledger, Neo4j) is what actually matters.
+
 ## Why this repo doesn't just commit those files to git
 
 `.gitignore` excludes `model_checkpoints/`, `backtrack_logs/`, and
-`dashboard/status.json` on purpose. Git tracks source code; these are
+`dashboard/status.json` / `dashboard/history.json` on purpose. Git tracks
+source code; these are
 frequently-changing runtime state (the checkpoint gets rewritten every few
 hours, the ledger grows every trade). Committing them would bloat the repo's
 history with binary diffs and doesn't actually solve persistence — a fresh
@@ -51,9 +63,11 @@ persists automatically on Neo4j's side — no volume to manage yourself):
 
 ## When you do pick a host
 
-Whatever you choose (VPS, Fly.io, Railway, home server, etc.), the only hard
+Whatever you choose (VPS, Fly.io, Railway, home server, etc.), the hard
 requirement is: **mount a persistent volume at `model_checkpoints/` and
-`backtrack_logs/`**, relative to wherever `main.py` runs from. Everything
+`backtrack_logs/`** (the model's actual learning), relative to wherever
+`main.py` runs from. Include `dashboard/` too if you want the charts to
+carry over across redeploys — optional, doesn't affect the model. Everything
 else in this doc stays true regardless of the specific platform — ask again
 when you're ready to pick one and this can be made concrete (Dockerfile,
 systemd unit, restart policy, etc.).

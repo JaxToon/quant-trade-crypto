@@ -268,6 +268,17 @@
   .paper-market { flex: 1; background: var(--bg-surface2); border-radius: 10px; padding: 10px 12px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); }
   .paper-market .mkt-title { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; font-family: 'Inter', sans-serif; }
 
+  /* ── Session charts ── */
+  .chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .chart-container { width: 100%; }
+  .chart-footer { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-top: 4px; font-family: 'JetBrains Mono', monospace; }
+  .price-legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 10px; }
+  .price-legend-item { font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-secondary); display: flex; align-items: center; gap: 5px; }
+  .price-legend-item .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .price-legend-item b.pos { color: var(--green); }
+  .price-legend-item b.neg { color: var(--red); }
+  @media (max-width: 900px) { .chart-row { grid-template-columns: 1fr; } }
+
   /* ── Logs ── */
   .log-terminal {
     background: rgba(0,0,0,0.3);
@@ -324,6 +335,19 @@
 </div>
 
 <div class="error-banner" id="error-banner">⚠ Cannot reach API server. Is <code>run_dashboard.py</code> running?</div>
+
+<!-- Row Charts: Equity curve + Price movement over the session -->
+<div class="grid chart-row" style="margin-bottom:14px">
+  <div class="card">
+    <div class="card-label">Equity Curve (paper trading balance)</div>
+    <div class="chart-container" id="equity-chart"><div class="no-data">Waiting for data...</div></div>
+  </div>
+  <div class="card">
+    <div class="card-label">Price Movement (% change this session)</div>
+    <div class="chart-container" id="price-chart"><div class="no-data">Waiting for data...</div></div>
+    <div class="price-legend" id="price-legend"></div>
+  </div>
+</div>
 
 <!-- Row 1: Regime | Veto | GNN Signals -->
 <div class="grid row-top" style="margin-bottom:14px">
@@ -525,6 +549,100 @@ function renderTrades(trades) {
   </table>`;
 }
 
+const SYMBOL_COLORS = {
+  BTCUSDT: '#f7931a', ETHUSDT: '#627eea', BNBUSDT: '#f3ba2f', SOLUSDT: '#14f195',
+  ADAUSDT: '#2f6fed', AVAXUSDT: '#e84142', DOTUSDT: '#e6007a', XRPUSDT: '#25a768',
+};
+
+function buildPath(values, width, height, minY, maxY) {
+  const range = (maxY - minY) || 1;
+  let d = '';
+  values.forEach((v, i) => {
+    if (v === null || v === undefined) return;
+    const x = (i / Math.max(1, values.length - 1)) * width;
+    const y = height - ((v - minY) / range) * height;
+    d += (d ? ' L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
+  });
+  return d;
+}
+
+function renderEquityCurve(history) {
+  const el = document.getElementById('equity-chart');
+  const points = (history || []).filter(h => h.balance !== null && h.balance !== undefined);
+  if (points.length < 2) {
+    el.innerHTML = '<div class="no-data">Belum cukup data — nunggu siklus decision loop berikutnya...</div>';
+    return;
+  }
+  const balances = points.map(p => p.balance);
+  const min = Math.min(...balances), max = Math.max(...balances);
+  const pad = (max - min) * 0.15 || Math.max(1, min * 0.02);
+  const W = 600, H = 160;
+  const path = buildPath(balances, W, H, min - pad, max + pad);
+  const first = balances[0], last = balances[balances.length - 1];
+  const color = last >= first ? 'var(--green)' : 'var(--red)';
+  const pct = first ? ((last - first) / first) * 100 : 0;
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:160px;display:block">
+      <path d="${path}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="chart-footer">
+      <span>Start: $${first.toLocaleString(undefined,{maximumFractionDigits:2})}</span>
+      <span style="color:${color}">Now: $${last.toLocaleString(undefined,{maximumFractionDigits:2})} (${pct>=0?'+':''}${pct.toFixed(2)}%)</span>
+    </div>`;
+}
+
+function renderPriceMovement(history) {
+  const el = document.getElementById('price-chart');
+  const legend = document.getElementById('price-legend');
+  const points = history || [];
+  if (points.length < 2) {
+    el.innerHTML = '<div class="no-data">Belum cukup data — nunggu siklus decision loop berikutnya...</div>';
+    legend.innerHTML = '';
+    return;
+  }
+
+  const symbols = Object.keys(SYMBOL_COLORS).filter(s => points.some(h => h.prices && h.prices[s] != null));
+  if (!symbols.length) {
+    el.innerHTML = '<div class="no-data">Waiting for price data...</div>';
+    legend.innerHTML = '';
+    return;
+  }
+
+  const W = 600, H = 200;
+  let minPct = 0, maxPct = 0;
+  const series = {};
+  symbols.forEach(sym => {
+    const raw = points.map(h => (h.prices ? h.prices[sym] : null));
+    const base = raw.find(p => p != null);
+    if (base == null) return;
+    const pct = raw.map(p => p == null ? null : ((p - base) / base) * 100);
+    series[sym] = pct;
+    pct.forEach(v => { if (v !== null) { minPct = Math.min(minPct, v); maxPct = Math.max(maxPct, v); } });
+  });
+  const pad = (maxPct - minPct) * 0.1 || 0.5;
+  minPct -= pad; maxPct += pad;
+
+  let svgPaths = '';
+  symbols.forEach(sym => {
+    const d = buildPath(series[sym], W, H, minPct, maxPct);
+    svgPaths += `<path d="${d}" fill="none" stroke="${SYMBOL_COLORS[sym]}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+  });
+  const zeroY = H - ((0 - minPct) / (maxPct - minPct || 1)) * H;
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:200px;display:block">
+    <line x1="0" y1="${zeroY.toFixed(1)}" x2="${W}" y2="${zeroY.toFixed(1)}" stroke="rgba(255,255,255,0.15)" stroke-width="1" stroke-dasharray="4,3"/>
+    ${svgPaths}
+  </svg>`;
+
+  legend.innerHTML = symbols.map(sym => {
+    const pct = series[sym];
+    const lastVal = [...pct].reverse().find(v => v !== null) ?? 0;
+    const cls = lastVal >= 0 ? 'pos' : 'neg';
+    return `<span class="price-legend-item"><span class="dot" style="background:${SYMBOL_COLORS[sym]}"></span>${sym.replace('USDT','')} <b class="${cls}">${lastVal>=0?'+':''}${lastVal.toFixed(2)}%</b></span>`;
+  }).join('');
+}
+
 function renderPaperTrading(pt) {
   if (!pt) {
     document.getElementById('paper-breakdown').innerHTML = '<div class="paper-market">Paper trading disabled</div>';
@@ -637,6 +755,8 @@ async function poll() {
       : 'unknown';
     document.getElementById('last-update').textContent = `Updated ${ts} UTC+0`;
 
+    renderEquityCurve(data.history);
+    renderPriceMovement(data.history);
     renderRegime(data.regime, data.bear_veto);
     renderSignals(data.gnn_signals);
     renderGraph(data.graph);

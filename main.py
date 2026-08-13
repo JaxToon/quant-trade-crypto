@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -68,6 +69,33 @@ _latest_indicators: dict[str, dict] = {}
 _shutdown = threading.Event()
 _paper_ledger = PaperTradingLedger() if settings.PAPER_TRADING_ENABLED else None
 
+# Rolling window for the dashboard's session charts (equity curve, price
+# movement). One point per decision-loop cycle (~60s) — 5000 points is
+# ~3.5 days. Persisted to disk and reloaded at startup so restarting
+# main.py doesn't reset the chart back to a blank slate — see DEPLOYMENT.md.
+# This is NOT the model's learning (that's the GNN checkpoint + paper
+# ledger, both already persisted); it's purely the dashboard's memory of
+# what happened, across however many runs you've done.
+HISTORY_FILE = os.path.join("dashboard", "history.json")
+MAX_HISTORY_POINTS = 5000
+
+
+def _load_history() -> list[dict]:
+    if not os.path.exists(HISTORY_FILE):
+        logger.info("No session history at %s — dashboard charts start fresh.", HISTORY_FILE)
+        return []
+    try:
+        with open(HISTORY_FILE) as f:
+            data = json.load(f)
+        logger.info("Session history restored from %s (%d points).", HISTORY_FILE, len(data))
+        return data
+    except Exception as exc:
+        logger.warning("Session history load failed, starting fresh: %s", exc)
+        return []
+
+
+_history: list[dict] = _load_history()
+
 
 def _validate_config() -> None:
     missing = []
@@ -100,7 +128,7 @@ def _build_entry_insights(gnn_signals: dict) -> dict:
     return insights
 
 
-def _run_paper_trading(insights: dict) -> None:
+def _run_paper_trading(insights: dict, prices: dict) -> None:
     """
     Scores entry_insight recommendations against live price with a virtual
     account — opens simulated positions on actionable insights, closes them
@@ -117,23 +145,40 @@ def _run_paper_trading(insights: dict) -> None:
             _paper_ledger.maybe_open(symbol, "spot", spot)
             _paper_ledger.maybe_open(symbol, "derivative", derivative)
 
-        prices = {
-            sym: ind.get("price") for sym, ind in _latest_indicators.items() if ind.get("price")
-        }
         _paper_ledger.check_and_close(prices)
         _paper_ledger.save()
     except Exception as exc:
         logger.warning("Paper trading update failed: %s", exc)
 
 
+def _record_history(prices: dict) -> None:
+    _history.append({
+        "timestamp": datetime.utcnow().isoformat(),
+        "balance": round(_paper_ledger.balance, 2) if _paper_ledger else None,
+        "prices": prices,
+    })
+    if len(_history) > MAX_HISTORY_POINTS:
+        del _history[: len(_history) - MAX_HISTORY_POINTS]
+    try:
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(_history, f)
+    except Exception as exc:
+        logger.debug("Session history save failed: %s", exc)
+
+
 def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
     try:
         insights = _build_entry_insights(signals)
-        _run_paper_trading(insights)
+        prices = {
+            sym: ind.get("price") for sym, ind in _latest_indicators.items() if ind.get("price")
+        }
+        _run_paper_trading(insights, prices)
+        _record_history(prices)
         payload = {
             "timestamp": datetime.utcnow().isoformat(),
             "regime": circuit.regime_label,
             "bear_veto": circuit.bear_veto_active,
+            "history": _history,
             "gnn_signals": {k: round(float(v), 4) for k, v in signals.items()},
             "entry_insights": insights,
             "paper_trading": _paper_ledger.stats() if _paper_ledger else None,
