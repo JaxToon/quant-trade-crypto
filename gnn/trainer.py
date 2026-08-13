@@ -250,6 +250,46 @@ class GNNTrainer:
             result[sym] = float(signals[idx, 0].cpu())
         return result
 
+    def predict_from_features(self, features: dict[str, list[float]]) -> dict[str, float]:
+        """
+        Point-in-time inference for backtest replay: same forward pass as
+        predict_all(), but Token features come from the caller (e.g. RSI/MACD/
+        Bollinger + SMC state recomputed at a specific historical candle) instead
+        of build_hetero_data()'s live "now" snapshot. Graph topology (edges,
+        Protocol/Macro_Event nodes) is still pulled from the live graph and held
+        fixed — there's no historical snapshot of those either, same limitation
+        train_on_history() already accepts. Symbols missing from `features` get
+        an all-zero feature vector (equivalent to "no data at this point").
+
+        features: {symbol: [18 floats, TOKEN_FEATURES order]}
+        Returns {symbol: signal ∈ [-1, +1]} for every symbol in `features`.
+        """
+        if self.model is None:
+            if not self.load():
+                logger.warning("No trained model found; returning 0.0 signal for all symbols")
+                return {sym: 0.0 for sym in features}
+
+        base_data, index_maps = build_hetero_data()
+        edge_index_dict = self._filter_edges(base_data)
+        token_symbols = base_data["Token"].symbol if hasattr(base_data["Token"], "symbol") else []
+        static_x = {nt: base_data[nt].x.to(self.device) for nt in base_data.node_types if nt != "Token"}
+
+        token_x = torch.tensor(
+            [features.get(sym, [0.0] * len(TOKEN_FEATURES)) for sym in token_symbols],
+            dtype=torch.float, device=self.device,
+        )
+
+        self.model.eval()
+        with torch.no_grad():
+            x_dict = {**static_x, "Token": token_x}
+            signals = self.model(x_dict, edge_index_dict)
+
+        result = {}
+        for sym in features:
+            idx = token_symbols.index(sym) if sym in token_symbols else -1
+            result[sym] = float(signals[idx, 0].cpu()) if idx >= 0 else 0.0
+        return result
+
     def get_attention_weights(
         self, symbol: str
     ) -> dict:
