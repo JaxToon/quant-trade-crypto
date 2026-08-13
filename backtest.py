@@ -117,15 +117,21 @@ def replay_symbol(symbol: str, candles: list[Candle], ledger: PaperTradingLedger
         #    gnn_signal=0.0: no point-in-time GNN snapshot exists for
         #    historical candles — see module docstring.
         insight = build_entry_insight(symbol, candle.close, smc_context, gnn_signal=0.0)
-        ledger.maybe_open(symbol, "spot", insight["spot"], timeframe=timeframe)
-        ledger.maybe_open(symbol, "derivative", insight["derivative"], timeframe=timeframe)
+        opened_at = candle.timestamp.isoformat()
+        ledger.maybe_open(symbol, "spot", insight["spot"], timeframe=timeframe, opened_at=opened_at)
+        ledger.maybe_open(symbol, "derivative", insight["derivative"], timeframe=timeframe, opened_at=opened_at)
 
         n_candles += 1
     return n_candles
 
 
-def run_replay(symbols_candles: dict[str, list[Candle]], path: str, timeframe: str) -> tuple[PaperTradingLedger, int, int]:
-    ledger = PaperTradingLedger(path=path, starting_balance=settings.PAPER_TRADING_STARTING_BALANCE)
+def run_replay(
+    symbols_candles: dict[str, list[Candle]], path: str, timeframe: str,
+    slippage_pct: float = 0.0, persist: bool = True,
+) -> tuple[PaperTradingLedger, int, int]:
+    ledger = PaperTradingLedger(
+        path=path, starting_balance=settings.PAPER_TRADING_STARTING_BALANCE, slippage_pct=slippage_pct,
+    )
     ledger.balance = ledger.starting_balance
     ledger.open_positions.clear()
     ledger.closed_trades.clear()
@@ -141,8 +147,54 @@ def run_replay(symbols_candles: dict[str, list[Candle]], path: str, timeframe: s
     # from the stats rather than counting it as a phantom win or loss.
     open_count = len(ledger.open_positions)
     ledger.open_positions.clear()
-    ledger.save()
+    if persist:
+        ledger.save()
     return ledger, total_candles, open_count
+
+
+# Adverse slippage applied to both legs of every fill — real friction the
+# rest of this backtest doesn't otherwise model (no order-book depth).
+SLIPPAGE_SWEEP_LEVELS = [0.0, 0.0002, 0.0005, 0.001, 0.0015, 0.002, 0.003]
+
+
+def run_slippage_sweep(symbols_candles: dict[str, list[Candle]], timeframe: str) -> None:
+    """
+    Runs the full (unsplit) window at increasing slippage assumptions to
+    find the level at which the backtested edge breaks even — answers
+    "how much real-world friction can this strategy actually tolerate?"
+    rather than assuming fills are always exact.
+    """
+    print(f"\n{'=' * 70}")
+    print(f"SLIPPAGE SENSITIVITY SWEEP [{timeframe}]")
+    print(f"{'=' * 70}")
+    print(f"{'Slippage/fill':<15}{'Trades':<9}{'Win Rate':<11}{'Return %':<12}{'Total PnL $':<14}")
+    print("-" * 70)
+
+    breakeven_flagged = False
+    prev_slip = 0.0
+    for slip in SLIPPAGE_SWEEP_LEVELS:
+        ledger, _, _ = run_replay(
+            symbols_candles, path="backtrack_logs/_slippage_sweep_scratch.json",
+            timeframe=timeframe, slippage_pct=slip, persist=False,
+        )
+        s = ledger.stats()
+        overall = s["overall"]
+        wr = f"{overall['win_rate_pct']:.1f}%" if overall["win_rate_pct"] is not None else "—"
+        print(
+            f"{slip * 100:>6.2f}%        {overall['trades']:<9}{wr:<11}"
+            f"{s['total_return_pct']:>+8.2f}%   ${overall['total_pnl_dollars']:>+11.2f}"
+        )
+        if not breakeven_flagged and overall["total_pnl_dollars"] < 0:
+            print(f"  ^ edge turns net-negative somewhere between {prev_slip*100:.2f}% and {slip*100:.2f}% slippage per fill")
+            breakeven_flagged = True
+        prev_slip = slip
+
+    if not breakeven_flagged:
+        print(f"\nEdge stayed net-positive across the whole {SLIPPAGE_SWEEP_LEVELS[-1]*100:.1f}% sweep range.")
+    print(
+        "\nFor reference: PAPER_TRADING_FEE_PCT is already 0.1%/side (0.2% round trip) on top of this —"
+        "\nthis sweep is testing ADDITIONAL slippage beyond that fee, i.e. real order-book/execution friction."
+    )
 
 
 def print_report(title: str, ledger: PaperTradingLedger, total_candles: int, open_count: int) -> None:
@@ -171,6 +223,11 @@ def main() -> None:
         "--timeframe", choices=settings.BINANCE_SMC_TIMEFRAMES, default=settings.BINANCE_KLINE_INTERVAL,
         help="Which SMC/FVG layer to backtest — run each one separately to compare layers.",
     )
+    parser.add_argument(
+        "--slippage-sweep", action="store_true",
+        help="Instead of the in-sample/out-of-sample report, run the full window at increasing "
+             "slippage assumptions to find where the edge breaks even.",
+    )
     args = parser.parse_args()
     days = min(args.days, YF_MAX_DAYS_5M)
     timeframe = args.timeframe
@@ -180,18 +237,25 @@ def main() -> None:
     print(f"ASSET_TYPE={settings.ASSET_TYPE} — {len(settings.WATCHLIST)} symbols: {settings.WATCHLIST}")
     print(f"Fetching {days}d of {timeframe} candles (via yfinance)...\n")
 
-    first_half: dict[str, list] = {}
-    second_half: dict[str, list] = {}
+    all_candles: dict[str, list] = {}
     for symbol in settings.WATCHLIST:
         candles = fetch_candles(symbol, days, timeframe)
         if not candles:
             print(f"  {symbol}: no historical data, skipping")
             continue
+        all_candles[symbol] = candles
+        print(f"  {symbol}: {len(candles)} candles ({candles[0].timestamp} -> {candles[-1].timestamp})")
+
+    if args.slippage_sweep:
+        run_slippage_sweep(all_candles, timeframe)
+        return
+
+    first_half: dict[str, list] = {}
+    second_half: dict[str, list] = {}
+    for symbol, candles in all_candles.items():
         mid = len(candles) // 2
         first_half[symbol] = candles[:mid]
         second_half[symbol] = candles[mid:]
-        print(f"  {symbol}: {len(candles)} candles ({candles[0].timestamp} -> {candles[-1].timestamp})"
-              f" — split at {candles[mid].timestamp}")
 
     is_path = f"backtrack_logs/backtest_ledger_insample_{settings.ASSET_TYPE}_{timeframe}.json"
     oos_path = f"backtrack_logs/backtest_ledger_oos_{settings.ASSET_TYPE}_{timeframe}.json"
