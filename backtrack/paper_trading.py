@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
 from config import settings
+from strategy.correlation import get_correlation
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,29 @@ class PaperTradingLedger:
                 entry_price * (1 - 1 / leverage) if direction == "long"
                 else entry_price * (1 + 1 / leverage)
             )
+
+        # Portfolio-level correlated-risk cap: an individually-fine 2% risk
+        # unit can still stack into a much bigger correlated bet if several
+        # majors are already open at once (backtest found peak 7 simultaneous
+        # positions, avg pairwise correlation 0.62 among them). Weight each
+        # open position's own risk ($ at its own stop) by how correlated it
+        # is to the SYMBOL being opened now, sum that up, and refuse to add
+        # more once the correlation-weighted total would cross the cap —
+        # even though this new trade would pass every other filter on its own.
+        correlated_exposure = sum(
+            pos.quantity * abs(pos.entry_price - pos.stop_loss) * get_correlation(symbol, pos.symbol)
+            for pos in self.open_positions.values()
+            if get_correlation(symbol, pos.symbol) >= settings.PORTFOLIO_CORRELATION_THRESHOLD
+        )
+        portfolio_cap = self.starting_balance * settings.PORTFOLIO_MAX_CORRELATED_RISK_PCT
+        if correlated_exposure + risk_amount > portfolio_cap:
+            reason = (
+                f"Portfolio correlated-risk cap tercapai "
+                f"(${correlated_exposure:.0f} exposure berkorelasi + ${risk_amount:.0f} trade baru "
+                f"> ${portfolio_cap:.0f} cap)"
+            )
+            logger.debug("%s %s: %s", symbol, market, reason)
+            return reason
 
         quantity = risk_amount / stop_distance
 

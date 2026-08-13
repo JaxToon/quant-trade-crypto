@@ -166,6 +166,18 @@ PAPER_TRADING_FEE_PCT = 0.001  # 0.1% per side (0.2% round trip) — Binance spo
 # normal price noise, guaranteeing stop-outs before the plan ever executes.
 PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER = 2.5
 
+# Portfolio-level correlated-risk cap: found via backtest analysis that 60%
+# of trades had at least one concurrent position in a correlated symbol
+# (avg correlation 0.62 among simultaneously-open pairs — basically the same
+# as the unconditional average, meaning positions weren't specifically
+# avoiding correlated overlap), with a peak of 7 simultaneous positions and
+# an estimated 14-35% of starting balance at risk at once if every
+# correlated position moved the same way together. "2% risk per trade" only
+# describes an ISOLATED trade — this caps the aggregate, correlation-
+# weighted exposure across everything currently open. See strategy/correlation.py.
+PORTFOLIO_CORRELATION_THRESHOLD = 0.5   # only count exposure from pairs correlated >= this
+PORTFOLIO_MAX_CORRELATED_RISK_PCT = 0.08  # cap correlation-weighted aggregate risk at 8% of starting balance
+
 # ── Historical backtest (backtest.py) ──────────────────────────────────────
 BACKTEST_DAYS = int(os.getenv("BACKTEST_DAYS", "30"))
 
