@@ -114,10 +114,15 @@ class StructuredStream:
         self._bm = BinanceSocketManager(self._client)
         # Subscribe to real OHLC kline streams (not miniTicker) — SMC/FVG need
         # actual candle bodies+wicks, which a last-price ticker cannot provide.
-        interval = settings.BINANCE_KLINE_INTERVAL
-        streams = [f"{sym.lower()}@kline_{interval}" for sym in settings.WATCHLIST]
+        # One subscription per (symbol, timeframe) — SMC/FVG runs independently
+        # on each layer in BINANCE_SMC_TIMEFRAMES; only the primary interval
+        # (BINANCE_KLINE_INTERVAL) also feeds the technical-indicator buffer
+        # and gets persisted to Neo4j, so RSI/MACD/BB never mix candles from
+        # different timeframes.
+        timeframes = settings.BINANCE_SMC_TIMEFRAMES
+        streams = [f"{sym.lower()}@kline_{tf}" for sym in settings.WATCHLIST for tf in timeframes]
         async with self._bm.multiplex_socket(streams) as msock:
-            logger.info("Binance kline stream open (%s): %s", interval, settings.WATCHLIST)
+            logger.info("Binance kline streams open %s: %s", timeframes, settings.WATCHLIST)
             while True:
                 msg = await msock.recv()
                 if msg is None:
@@ -136,24 +141,35 @@ class StructuredStream:
         if not k:
             return
 
+        interval = k.get("i", settings.BINANCE_KLINE_INTERVAL)
         price = float(k.get("c", 0))
         volume = float(k.get("v", 0))
         is_closed = bool(k.get("x", False))
+        is_primary = interval == settings.BINANCE_KLINE_INTERVAL
 
-        indicators = self._buffers[symbol].update(price, volume)
+        # RSI/MACD/BB only make sense as a single rolling window on one
+        # timeframe — secondary layers (15m/1h) skip technical indicators
+        # entirely and pass through bare OHLCV for SMC/FVG to consume.
+        if is_primary:
+            indicators = self._buffers[symbol].update(price, volume)
+        else:
+            indicators = {"price": price, "volume": volume}
+
         indicators.update({
             "open": float(k.get("o", price)),
             "high": float(k.get("h", price)),
             "low": float(k.get("l", price)),
             "close": price,
+            "interval": interval,
         })
         indicators["kline_closed"] = is_closed
 
-        # Persist to Neo4j only on candle close — avoids write-storming every
-        # partial-candle tick with data that will be overwritten seconds later.
-        if is_closed:
+        # Persist to Neo4j only for the primary timeframe's closed candles —
+        # avoids write-storming Token nodes with mismatched-timeframe data
+        # from three concurrent streams.
+        if is_closed and is_primary:
             try:
-                persisted = {k_: v for k_, v in indicators.items() if k_ != "kline_closed"}
+                persisted = {k_: v for k_, v in indicators.items() if k_ not in ("kline_closed", "interval")}
                 Neo4jClient.get().update_token_market_data(symbol, **persisted)
             except Exception as exc:
                 logger.warning("Neo4j write failed for %s: %s", symbol, exc)

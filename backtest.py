@@ -23,7 +23,8 @@ only be evaluated going forward, via main.py's live paper trading.
 Uses separate, asset-type-tagged ledger files (backtrack_logs/backtest_ledger_*_{crypto,stock}.json)
 so it never touches the live paper-trading ledger main.py maintains.
 
-Usage: python backtest.py [--days N]  (N is capped at 60 — Yahoo's 5m limit)
+Usage: python backtest.py [--days N] [--timeframe 5m|15m|1h]
+(days capped at 60 — Yahoo's limit for sub-daily intervals)
 """
 from __future__ import annotations
 
@@ -59,11 +60,11 @@ STOCK_TICKERS = {sym: [sym] for sym in settings.STOCK_WATCHLIST}
 SYMBOL_TICKERS = STOCK_TICKERS if settings.ASSET_TYPE == "stock" else CRYPTO_TICKERS
 
 
-def fetch_candles(symbol: str, days: int) -> list[Candle]:
+def fetch_candles(symbol: str, days: int, timeframe: str) -> list[Candle]:
     tickers = SYMBOL_TICKERS.get(symbol, [])
     for ticker in tickers:
         try:
-            df = yf.download(ticker, period=f"{days}d", interval="5m", progress=False, auto_adjust=True)
+            df = yf.download(ticker, period=f"{days}d", interval=timeframe, progress=False, auto_adjust=True)
             if df.empty:
                 continue
 
@@ -85,7 +86,7 @@ def fetch_candles(symbol: str, days: int) -> list[Candle]:
     return []
 
 
-def replay_symbol(symbol: str, candles: list[Candle], ledger: PaperTradingLedger) -> int:
+def replay_symbol(symbol: str, candles: list[Candle], ledger: PaperTradingLedger, timeframe: str) -> int:
     """
     Walks candles in order. At each closed candle: first check open paper
     positions against that candle's [low, high] range (so a position opened
@@ -98,7 +99,7 @@ def replay_symbol(symbol: str, candles: list[Candle], ledger: PaperTradingLedger
     n_candles = 0
     for candle in candles:
         # 1. Resolve any open positions against this candle's range FIRST.
-        ledger.check_and_close_ohlc(symbol, candle.low, candle.high, closed_at=candle.timestamp.isoformat())
+        ledger.check_and_close_ohlc(symbol, candle.low, candle.high, closed_at=candle.timestamp.isoformat(), timeframe=timeframe)
 
         # 2. Update SMC/FVG state with this now-closed candle.
         smc_signals = smc.update(candle)
@@ -116,14 +117,14 @@ def replay_symbol(symbol: str, candles: list[Candle], ledger: PaperTradingLedger
         #    gnn_signal=0.0: no point-in-time GNN snapshot exists for
         #    historical candles — see module docstring.
         insight = build_entry_insight(symbol, candle.close, smc_context, gnn_signal=0.0)
-        ledger.maybe_open(symbol, "spot", insight["spot"])
-        ledger.maybe_open(symbol, "derivative", insight["derivative"])
+        ledger.maybe_open(symbol, "spot", insight["spot"], timeframe=timeframe)
+        ledger.maybe_open(symbol, "derivative", insight["derivative"], timeframe=timeframe)
 
         n_candles += 1
     return n_candles
 
 
-def run_replay(symbols_candles: dict[str, list[Candle]], path: str) -> tuple[PaperTradingLedger, int, int]:
+def run_replay(symbols_candles: dict[str, list[Candle]], path: str, timeframe: str) -> tuple[PaperTradingLedger, int, int]:
     ledger = PaperTradingLedger(path=path, starting_balance=settings.PAPER_TRADING_STARTING_BALANCE)
     ledger.balance = ledger.starting_balance
     ledger.open_positions.clear()
@@ -134,7 +135,7 @@ def run_replay(symbols_candles: dict[str, list[Candle]], path: str) -> tuple[Pap
 
     total_candles = 0
     for symbol, candles in symbols_candles.items():
-        total_candles += replay_symbol(symbol, candles, ledger)
+        total_candles += replay_symbol(symbol, candles, ledger, timeframe)
 
     # Anything still open at the end of the window never resolved — drop it
     # from the stats rather than counting it as a phantom win or loss.
@@ -166,18 +167,23 @@ def print_report(title: str, ledger: PaperTradingLedger, total_candles: int, ope
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest entry_insight recommendations on historical candles.")
     parser.add_argument("--days", type=int, default=min(settings.BACKTEST_DAYS, YF_MAX_DAYS_5M))
+    parser.add_argument(
+        "--timeframe", choices=settings.BINANCE_SMC_TIMEFRAMES, default=settings.BINANCE_KLINE_INTERVAL,
+        help="Which SMC/FVG layer to backtest — run each one separately to compare layers.",
+    )
     args = parser.parse_args()
     days = min(args.days, YF_MAX_DAYS_5M)
+    timeframe = args.timeframe
     if args.days > YF_MAX_DAYS_5M:
-        print(f"Note: capping to {YF_MAX_DAYS_5M}d — Yahoo Finance doesn't serve 5m candles further back than that.\n")
+        print(f"Note: capping to {YF_MAX_DAYS_5M}d — Yahoo Finance doesn't serve sub-daily candles further back than that.\n")
 
     print(f"ASSET_TYPE={settings.ASSET_TYPE} — {len(settings.WATCHLIST)} symbols: {settings.WATCHLIST}")
-    print(f"Fetching {days}d of 5m candles (via yfinance)...\n")
+    print(f"Fetching {days}d of {timeframe} candles (via yfinance)...\n")
 
     first_half: dict[str, list] = {}
     second_half: dict[str, list] = {}
     for symbol in settings.WATCHLIST:
-        candles = fetch_candles(symbol, days)
+        candles = fetch_candles(symbol, days, timeframe)
         if not candles:
             print(f"  {symbol}: no historical data, skipping")
             continue
@@ -187,15 +193,13 @@ def main() -> None:
         print(f"  {symbol}: {len(candles)} candles ({candles[0].timestamp} -> {candles[-1].timestamp})"
               f" — split at {candles[mid].timestamp}")
 
-    ledger_is, candles_is, open_is = run_replay(
-        first_half, f"backtrack_logs/backtest_ledger_insample_{settings.ASSET_TYPE}.json"
-    )
-    ledger_oos, candles_oos, open_oos = run_replay(
-        second_half, f"backtrack_logs/backtest_ledger_oos_{settings.ASSET_TYPE}.json"
-    )
+    is_path = f"backtrack_logs/backtest_ledger_insample_{settings.ASSET_TYPE}_{timeframe}.json"
+    oos_path = f"backtrack_logs/backtest_ledger_oos_{settings.ASSET_TYPE}_{timeframe}.json"
+    ledger_is, candles_is, open_is = run_replay(first_half, is_path, timeframe)
+    ledger_oos, candles_oos, open_oos = run_replay(second_half, oos_path, timeframe)
 
-    print_report(f"IN-SAMPLE (first half, ~{days // 2}d)", ledger_is, candles_is, open_is)
-    print_report(f"OUT-OF-SAMPLE (second half, ~{days - days // 2}d)", ledger_oos, candles_oos, open_oos)
+    print_report(f"IN-SAMPLE [{timeframe}] (first half, ~{days // 2}d)", ledger_is, candles_is, open_is)
+    print_report(f"OUT-OF-SAMPLE [{timeframe}] (second half, ~{days - days // 2}d)", ledger_oos, candles_oos, open_oos)
 
     wr_is = ledger_is.stats()["overall"]["win_rate_pct"]
     wr_oos = ledger_oos.stats()["overall"]["win_rate_pct"]
@@ -211,10 +215,8 @@ def main() -> None:
     print("\nNote: pnl_dollars assumes each trade's $ risk is independent of every other")
     print("open position — it is NOT a realistic capital-constrained return projection.")
     print("Win rate is the number to trust here; the dollar figures are directional.")
-    print(
-        f"\nFull trade logs: backtrack_logs/backtest_ledger_insample_{settings.ASSET_TYPE}.json, "
-        f"backtest_ledger_oos_{settings.ASSET_TYPE}.json"
-    )
+    print(f"\nFull trade logs: {is_path}, {oos_path}")
+    print(f"\nCompare layers: python backtest.py --timeframe 15m   /   --timeframe 1h")
 
 
 if __name__ == "__main__":
