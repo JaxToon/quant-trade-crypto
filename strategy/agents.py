@@ -128,10 +128,14 @@ class AgentDebate:
 
 def run_bull_agent(symbol: str, gnn_signal: float, indicators: dict, graph_context: str, smc_context: dict = None) -> tuple[float, str]:
     system = (
-        "You are a Smart Money trading agent specializing in institutional order flow analysis. "
-        "You understand Order Blocks, Fair Value Gaps, liquidity zones, and market structure. "
-        "Analyze data and output ONLY valid JSON: {\"score\": 0.X, \"reasoning\": \"...\"}. "
-        "score is your bullish conviction from 0.0 (no conviction) to 1.0 (maximum bullish)."
+        "You are a senior institutional order-flow trader with 15+ years reading Smart Money "
+        "footprints for a proprietary trading desk — the same rigor a Citadel or hedge-fund quant "
+        "desk applies before greenlighting a position. You are building the bull case, but you are "
+        "not a cheerleader: an unconvincing setup should score low, not a hedged 0.5. "
+        "Output ONLY valid JSON: {\"score\": 0.X, \"reasoning\": \"...\"}. "
+        "score is your bullish conviction from 0.0 (no conviction) to 1.0 (maximum bullish). "
+        "reasoning must be one tight sentence naming the single strongest piece of confluence (or "
+        "the lack of one) — not a restatement of the input data."
     )
 
     smc_context = smc_context or {}
@@ -151,13 +155,13 @@ Smart Money Concepts:
 Graph Context (fundamental signals):
 {graph_context}
 
-Analyze the institutional footprint. Are we seeing:
-- Bullish Order Blocks being respected?
-- Bullish FVG acting as support?
-- Market structure showing higher highs/higher lows?
-- Liquidity sweeps followed by reversals?
+Build the bull case like a pre-trade memo. Work through:
+- Confluence: does the GNN signal agree with the SMC picture, or are you leaning on just one of them?
+- Are bullish Order Blocks / FVGs actually being respected, or merely present?
+- Is market structure confirming (higher highs/higher lows), or is this a countertrend bet?
+- Is there a live liquidity-sweep-then-reversal pattern, or just proximity to a zone?
 
-Rate your BULLISH conviction 0.0-1.0. JSON only."""
+Rate your BULLISH conviction 0.0-1.0 — let it be low if the setup is weak. JSON only."""
 
     try:
         text = _call_llm(settings.BULL_BEAR_MODEL, system, user)
@@ -173,10 +177,14 @@ Rate your BULLISH conviction 0.0-1.0. JSON only."""
 
 def run_bear_agent(symbol: str, gnn_signal: float, indicators: dict, graph_context: str, loss_history: list[str], smc_context: dict = None) -> tuple[float, str]:
     system = (
-        "You are a Smart Money risk assessment agent. You identify institutional distribution, "
-        "bearish order blocks, liquidity grabs (stop hunts), and market structure breaks. "
+        "You are a senior risk officer conducting adversarial due diligence on a trade before it's "
+        "approved — your job is to find every real reason this position fails, the way a hedge "
+        "fund's risk desk stress-tests a book before the PM is allowed to size up. You are not here "
+        "to be balanced; you are here to break the bull case if it can be broken. "
         "Output ONLY valid JSON: {\"score\": 0.X, \"reasoning\": \"...\"}. "
-        "score is your BEARISH/RISK conviction from 0.0 (no risk) to 1.0 (maximum risk)."
+        "score is your BEARISH/RISK conviction from 0.0 (no risk) to 1.0 (maximum risk). "
+        "reasoning must name the single most concrete danger (or state plainly that none stands out) "
+        "— not a generic hedge."
     )
 
     smc_context = smc_context or {}
@@ -196,16 +204,16 @@ Smart Money Concepts:
 Graph Risk Context:
 {graph_context}
 
-Recent System Losses (learn from these):
+Recent System Losses (learn from these — is this setup rhyming with one of them?):
 {loss_summary}
 
-Analyze institutional distribution signs:
-- Bearish Order Blocks being formed?
-- Bearish FVG acting as resistance?
-- Market structure breaking down (lower lows)?
-- Buy-side liquidity being swept before dump?
+Stress-test this trade like a risk-committee memo. Work through:
+- Distribution: are bearish Order Blocks / FVGs forming against this move?
+- Structure break: any sign of lower lows undermining the bullish read?
+- Liquidity trap: does this look like buy-side liquidity being swept before a reversal down?
+- Precedent: does this setup resemble a documented past loss, or is it genuinely new territory?
 
-Rate the BEARISH RISK level 0.0-1.0. JSON only."""
+Rate the BEARISH RISK level 0.0-1.0 — don't inflate it just to look cautious. JSON only."""
 
     try:
         text = _call_llm(settings.BULL_BEAR_MODEL, system, user)
@@ -227,10 +235,14 @@ def run_critic(
     backtrack_summary: str,
 ) -> tuple[float, str]:
     system = (
-        "You are the synthesis critic for a crypto trading system. "
-        "Your sole job: check whether the bull agent is repeating a past mistake identified in the backtrack log. "
+        "You are the risk-committee reviewer for a systematic trading desk, applying a radical-"
+        "transparency standard: your job is to hold the bull case to documented evidence, not to "
+        "split the difference between the two agents. "
         "Output ONLY valid JSON: {\"c_risk\": 0.X, \"reasoning\": \"...\"}. "
-        "c_risk is a penalty from 0.0 (bull argument is novel and sound) to 0.3 (argument repeats a known failure)."
+        "c_risk is a penalty from 0.0 (bull argument is novel and sound) to 0.3 (argument repeats a "
+        "known failure or leans on a single signal with no confluence). "
+        "reasoning must state the specific match to a past loss, or the specific lack of confluence — "
+        "or state plainly that the argument holds up."
     )
     user = f"""Symbol: {symbol}
 
@@ -240,7 +252,11 @@ Bear Agent said (score={bear_score:.2f}): {bear_reasoning}
 Historical Backtrack Losses (past mistakes to avoid):
 {backtrack_summary if backtrack_summary else 'No historical losses recorded yet.'}
 
-Is the bull argument repeating a past failure pattern?
+Two checks:
+1. Is the bull argument repeating a documented past failure pattern above?
+2. Is the bull case leaning on a single signal (e.g. GNN alone, or SMC alone) with no real
+   confluence between them — the kind of thin setup that looks fine until it isn't?
+
 Output c_risk penalty 0.0-0.3. JSON only."""
 
     try:
