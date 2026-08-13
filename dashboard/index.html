@@ -673,6 +673,7 @@ function renderPaperTrading(pt) {
     <div>Trades: ${b.trades} (${b.wins}W / ${b.losses}L)</div>
     <div>Win rate: ${b.win_rate_pct === null ? '—' : b.win_rate_pct.toFixed(1) + '%'}</div>
     <div>PnL: ${b.total_pnl_dollars >= 0 ? '+' : ''}$${b.total_pnl_dollars.toFixed(2)}</div>
+    ${b.liquidations ? `<div style="color:var(--red)">⚠ ${b.liquidations} liquidated</div>` : ''}
   </div>`;
   document.getElementById('paper-breakdown').innerHTML =
     mkt('Spot', pt.spot) + mkt('Derivative', pt.derivative) +
