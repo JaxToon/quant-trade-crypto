@@ -122,27 +122,36 @@ class PaperTradingLedger:
 
     # ── Trading ────────────────────────────────────────────────────────────
 
-    def maybe_open(self, symbol: str, market: str, rec: dict) -> None:
-        """rec: a `spot` or `derivative` block from entry_insight.build_entry_insight."""
+    def maybe_open(self, symbol: str, market: str, rec: dict) -> str | None:
+        """
+        rec: a `spot` or `derivative` block from entry_insight.build_entry_insight.
+
+        Returns None if a position was opened, or if there was nothing to do
+        (no signal, already open). Returns a short human-readable reason if
+        entry_insight says "actionable" but this ledger rejected it anyway —
+        surfaced to the dashboard so a rejection is never silently invisible.
+        """
         key = (symbol, market)
         if key in self.open_positions:
-            return
+            return None
         if not rec.get("actionable"):
-            return
+            return None
         entry_zone = rec.get("entry_zone")
         stop_loss = rec.get("stop_loss")
         target = rec.get("target")
         if not entry_zone or stop_loss is None or target is None:
-            return
+            return None
 
         entry_price = sum(entry_zone) / 2
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < entry_price * MIN_STOP_DISTANCE_PCT:
-            logger.debug(
-                "%s %s: stop too tight (%.8f < %.8f), skipping to avoid a sizing blowup",
-                symbol, market, stop_distance, entry_price * MIN_STOP_DISTANCE_PCT,
+            stop_pct = stop_distance / entry_price * 100
+            reason = (
+                f"Stop terlalu rapat untuk profitable setelah fee "
+                f"({stop_pct:.3f}% < {MIN_STOP_DISTANCE_PCT * 100:.2f}% minimum)"
             )
-            return
+            logger.debug("%s %s: %s", symbol, market, reason)
+            return reason
 
         # Fixed-risk sizing off STARTING balance, not current balance:
         # sizing off current balance compounds every single trade, and over
@@ -175,6 +184,7 @@ class PaperTradingLedger:
             "PAPER OPEN %s %s %s @ %.6f | SL=%.6f TP=%.6f qty=%.4f",
             market, pos.direction.upper(), symbol, entry_price, stop_loss, target, quantity,
         )
+        return None
 
     def check_and_close(self, current_prices: dict[str, float]) -> None:
         """Live mode: check open positions against a single latest price per symbol."""

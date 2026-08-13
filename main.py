@@ -128,27 +128,37 @@ def _build_entry_insights(gnn_signals: dict) -> dict:
     return insights
 
 
-def _run_paper_trading(insights: dict, prices: dict) -> None:
+def _run_paper_trading(insights: dict, prices: dict) -> dict:
     """
     Scores entry_insight recommendations against live price with a virtual
     account — opens simulated positions on actionable insights, closes them
     on SL/TP cross. No real or testnet orders are placed here.
+
+    Returns {symbol: {"spot": reason, "derivative": reason}} for any insight
+    that said "actionable" but the ledger rejected anyway — so a rejection
+    like "stop too tight for fees" is visible on the dashboard instead of
+    silently invisible (it used to only log at debug level, which the
+    default INFO config never shows).
     """
+    rejections: dict[str, dict] = {}
     if _paper_ledger is None:
-        return
+        return rejections
     try:
         for symbol, ins in insights.items():
             # confidence lives on the parent insight dict, not the spot/
             # derivative sub-blocks — carry it along so the ledger records it.
             spot = {**ins.get("spot", {}), "confidence": ins.get("confidence", 0.0)}
             derivative = {**ins.get("derivative", {}), "confidence": ins.get("confidence", 0.0)}
-            _paper_ledger.maybe_open(symbol, "spot", spot)
-            _paper_ledger.maybe_open(symbol, "derivative", derivative)
+            spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot)
+            deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative)
+            if spot_reason or deriv_reason:
+                rejections[symbol] = {"spot": spot_reason, "derivative": deriv_reason}
 
         _paper_ledger.check_and_close(prices)
         _paper_ledger.save()
     except Exception as exc:
         logger.warning("Paper trading update failed: %s", exc)
+    return rejections
 
 
 def _record_history(prices: dict) -> None:
@@ -172,7 +182,7 @@ def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
         prices = {
             sym: ind.get("price") for sym, ind in _latest_indicators.items() if ind.get("price")
         }
-        _run_paper_trading(insights, prices)
+        paper_trade_rejections = _run_paper_trading(insights, prices)
         _record_history(prices)
         payload = {
             "timestamp": datetime.utcnow().isoformat(),
@@ -182,6 +192,7 @@ def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
             "history": _history,
             "gnn_signals": {k: round(float(v), 4) for k, v in signals.items()},
             "entry_insights": insights,
+            "paper_trade_rejections": paper_trade_rejections,
             "paper_trading": _paper_ledger.stats() if _paper_ledger else None,
         }
         with open("dashboard/status.json", "w") as f:
