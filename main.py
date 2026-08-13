@@ -43,7 +43,7 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("main")
-logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
