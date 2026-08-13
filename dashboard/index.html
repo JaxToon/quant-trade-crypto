@@ -261,6 +261,7 @@
   .insight-detail { font-size: 11px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; line-height: 1.7; }
   .insight-note { font-size: 10px; color: var(--text-dim); margin-top: 4px; font-family: 'Inter', sans-serif; }
   .insight-inactive { opacity: 0.5; }
+  .insight-rejected { font-size: 10px; color: var(--amber); margin-top: 4px; font-family: 'Inter', sans-serif; }
 
   /* ── Paper trading ── */
   .paper-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 12px; }
@@ -683,7 +684,7 @@ function fmtZone(zone) {
   return `${fmtPrice(zone[0])} – ${fmtPrice(zone[1])}`;
 }
 
-function renderInsightSide(block, kind) {
+function renderInsightSide(block, kind, rejectionReason) {
   if (!block) return '<div class="no-data">—</div>';
   const dir = block.direction || 'neutral';
   const inactiveCls = block.actionable ? '' : ' insight-inactive';
@@ -691,6 +692,9 @@ function renderInsightSide(block, kind) {
   if (kind === 'derivative' && block.suggested_leverage) {
     extra = `<div>Leverage: ${block.suggested_leverage}x</div><div>Est. liquidation: ${fmtPrice(block.est_liquidation)}</div>`;
   }
+  const rejectionHtml = rejectionReason
+    ? `<div class="insight-rejected">⚠ Belum jadi paper trade: ${rejectionReason}</div>`
+    : '';
   return `<div class="${inactiveCls.trim()}">
     <span class="insight-dir ${dir}">${dir.toUpperCase()}</span>
     <div class="insight-detail">
@@ -699,16 +703,20 @@ function renderInsightSide(block, kind) {
       ${extra}
     </div>
     <div class="insight-note">${block.note || ''}</div>
+    ${rejectionHtml}
   </div>`;
 }
 
-function renderEntryInsights(insights) {
+function renderEntryInsights(insights, rejections) {
   const el = document.getElementById('insight-grid');
   if (!insights || Object.keys(insights).length === 0) {
     el.innerHTML = '<div class="no-data">Waiting for SMC/FVG signals...</div>';
     return;
   }
-  el.innerHTML = Object.values(insights).map(ins => `
+  rejections = rejections || {};
+  el.innerHTML = Object.values(insights).map(ins => {
+    const rej = rejections[ins.symbol] || {};
+    return `
     <div class="insight-row">
       <div>
         <div class="insight-symbol">${ins.symbol}</div>
@@ -716,14 +724,14 @@ function renderEntryInsights(insights) {
       </div>
       <div>
         <div class="insight-col-label">Spot</div>
-        ${renderInsightSide(ins.spot, 'spot')}
+        ${renderInsightSide(ins.spot, 'spot', rej.spot)}
       </div>
       <div>
         <div class="insight-col-label">Derivative</div>
-        ${renderInsightSide(ins.derivative, 'derivative')}
+        ${renderInsightSide(ins.derivative, 'derivative', rej.derivative)}
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function parseLine(raw) {
@@ -768,7 +776,7 @@ async function poll() {
     renderSignals(data.gnn_signals);
     renderGraph(data.graph);
     renderTrades(data.graph?.recent_trades);
-    renderEntryInsights(data.entry_insights);
+    renderEntryInsights(data.entry_insights, data.paper_trade_rejections);
     renderPaperTrading(data.paper_trading);
     renderLogs(data.recent_logs);
 
