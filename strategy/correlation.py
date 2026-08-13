@@ -13,9 +13,16 @@ computing this live from a rolling price buffer. Re-run the generation
 snippet in DEPLOYMENT.md-adjacent notes if this goes stale (or ask to
 regenerate — it's a ~10-line script).
 
-Stock correlations are NOT covered — ASSET_TYPE=stock falls back to
-treating all pairs as uncorrelated (0.0) here, which is a known gap, not a
-claim that stocks are actually uncorrelated.
+Stock correlations (STOCK_CORRELATION_MATRIX) computed the same way, 30d
+hourly returns via yfinance. Much noisier than the crypto matrix — hourly
+stock data only exists during ~6.5h/day trading sessions (209 observations
+over 30 days vs crypto's ~720 for the same window), and large-cap tech
+correlations came out weaker and less consistent than expected (e.g.
+AAPL-AMZN at -0.523, where same-sector large caps are usually positively
+correlated) — plausibly idiosyncratic, earnings-driven moves during this
+specific window rather than a stable structural relationship. Treat the
+stock matrix as lower-confidence than the crypto one; a longer window
+would help but wasn't re-run before this snapshot was taken.
 """
 from __future__ import annotations
 
@@ -52,14 +59,51 @@ CRYPTO_CORRELATION_MATRIX: dict[tuple[str, str], float] = {
     ("DOTUSDT", "XRPUSDT"): 0.583,
 }
 
+# (symbol_a, symbol_b) -> Pearson correlation of hourly returns, 30d window.
+# See module docstring — noisier / lower-confidence than the crypto matrix.
+STOCK_CORRELATION_MATRIX: dict[tuple[str, str], float] = {
+    ("AAPL", "MSFT"): -0.048,
+    ("AAPL", "GOOGL"): -0.111,
+    ("AAPL", "AMZN"): -0.523,
+    ("AAPL", "NVDA"): -0.138,
+    ("AAPL", "META"): -0.020,
+    ("AAPL", "TSLA"): 0.006,
+    ("AAPL", "AVGO"): 0.004,
+    ("MSFT", "GOOGL"): 0.194,
+    ("MSFT", "AMZN"): 0.434,
+    ("MSFT", "NVDA"): 0.199,
+    ("MSFT", "META"): -0.194,
+    ("MSFT", "TSLA"): 0.264,
+    ("MSFT", "AVGO"): 0.178,
+    ("GOOGL", "AMZN"): 0.545,
+    ("GOOGL", "NVDA"): 0.166,
+    ("GOOGL", "META"): 0.413,
+    ("GOOGL", "TSLA"): 0.382,
+    ("GOOGL", "AVGO"): 0.008,
+    ("AMZN", "NVDA"): 0.222,
+    ("AMZN", "META"): 0.175,
+    ("AMZN", "TSLA"): 0.239,
+    ("AMZN", "AVGO"): -0.028,
+    ("NVDA", "META"): 0.049,
+    ("NVDA", "TSLA"): 0.365,
+    ("NVDA", "AVGO"): 0.579,
+    ("META", "TSLA"): 0.252,
+    ("META", "AVGO"): -0.181,
+    ("TSLA", "AVGO"): 0.322,
+}
+
 
 def get_correlation(symbol_a: str, symbol_b: str) -> float:
     """Returns 1.0 for the same symbol, else the looked-up pairwise
-    correlation, else 0.0 (unknown pair — e.g. stock symbols not covered)."""
+    correlation from whichever matrix contains the pair (crypto and stock
+    symbol namespaces never overlap — "BTCUSDT" vs "AAPL"), else 0.0 for a
+    genuinely unknown pair."""
     if symbol_a == symbol_b:
         return 1.0
-    return (
-        CRYPTO_CORRELATION_MATRIX.get((symbol_a, symbol_b))
-        or CRYPTO_CORRELATION_MATRIX.get((symbol_b, symbol_a))
-        or 0.0
-    )
+    for matrix in (CRYPTO_CORRELATION_MATRIX, STOCK_CORRELATION_MATRIX):
+        val = matrix.get((symbol_a, symbol_b))
+        if val is None:
+            val = matrix.get((symbol_b, symbol_a))
+        if val is not None:
+            return val
+    return 0.0

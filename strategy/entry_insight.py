@@ -67,8 +67,8 @@ def build_entry_insight(symbol: str, price: float, smc: dict | None, gnn_signal:
             base["spot"]["note"] = base["derivative"]["note"] = veto_note
         return base
 
-    base["spot"] = _spot_recommendation(direction, entry_zone, stop_loss, target)
-    base["derivative"] = _derivative_recommendation(direction, entry_zone, stop_loss, target, price)
+    base["spot"] = _spot_recommendation(direction, entry_zone, stop_loss, target, confidence)
+    base["derivative"] = _derivative_recommendation(direction, entry_zone, stop_loss, target, price, confidence)
     return base
 
 
@@ -97,7 +97,7 @@ def _structure_context(smc: dict) -> str:
     return f"Market structure: {smc.get('market_structure', 'unknown')}"
 
 
-def _spot_recommendation(direction: str, entry_zone, stop_loss, target) -> dict:
+def _spot_recommendation(direction: str, entry_zone, stop_loss, target, confidence: float) -> dict:
     if direction == "long":
         return {
             "actionable": True,
@@ -105,6 +105,7 @@ def _spot_recommendation(direction: str, entry_zone, stop_loss, target) -> dict:
             "entry_zone": entry_zone,
             "stop_loss": stop_loss,
             "target": target,
+            "confidence": confidence,
             "note": "Bullish setup — bisa entry beli langsung di spot.",
         }
     # Spot can't short — bearish signal is informational only.
@@ -114,11 +115,12 @@ def _spot_recommendation(direction: str, entry_zone, stop_loss, target) -> dict:
         "entry_zone": entry_zone,
         "stop_loss": stop_loss,
         "target": target,
+        "confidence": confidence,
         "note": "Sinyal bearish — spot tidak bisa short. Pertimbangkan hindari entry atau tunggu.",
     }
 
 
-def _derivative_recommendation(direction: str, entry_zone, stop_loss, target, price: float) -> dict:
+def _derivative_recommendation(direction: str, entry_zone, stop_loss, target, price: float, confidence: float) -> dict:
     leverage = settings.INSIGHT_DERIVATIVE_LEVERAGE
     entry_ref = price
     if entry_zone:
@@ -137,6 +139,7 @@ def _derivative_recommendation(direction: str, entry_zone, stop_loss, target, pr
         "entry_zone": entry_zone,
         "stop_loss": stop_loss,
         "target": target,
+        "confidence": confidence,
         "suggested_leverage": leverage,
         "est_liquidation": liquidation,
         "note": f"Estimasi kasar @{leverage}x isolated, tidak menghitung funding rate/maintenance margin.",
