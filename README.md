@@ -470,7 +470,3 @@ MIT License - see LICENSE file
 - Smart Money Concepts inspired by ICT (Inner Circle Trader)
 - GNN architecture based on PyTorch Geometric
 - Multi-agent framework inspired by AutoGen
-
----
-
-**Built with Claude Code** 🤖
