@@ -176,6 +176,7 @@ def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
         _record_history(prices)
         payload = {
             "timestamp": datetime.utcnow().isoformat(),
+            "asset_type": settings.ASSET_TYPE,
             "regime": circuit.regime_label,
             "bear_veto": circuit.bear_veto_active,
             "history": _history,

@@ -71,6 +71,11 @@
     50%       { opacity: 0.5; transform: scale(0.85); }
   }
   .last-update { font-size: 12px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
+  .asset-badge {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 20px; margin-left: 4px; vertical-align: middle;
+    background: var(--blue-bg); color: var(--blue); border: 1px solid rgba(59,130,246,0.2);
+  }
 
   .grid {
     display: grid;
@@ -330,6 +335,7 @@
   <h1>
     <div class="pulse" id="pulse"></div>
     TraderStuff — Live Monitor
+    <span class="asset-badge" id="asset-badge"></span>
   </h1>
   <div class="last-update" id="last-update">connecting...</div>
 </div>
@@ -754,6 +760,7 @@ async function poll() {
       ? new Date(data.timestamp + 'Z').toLocaleTimeString()
       : 'unknown';
     document.getElementById('last-update').textContent = `Updated ${ts} UTC+0`;
+    document.getElementById('asset-badge').textContent = data.asset_type || '';
 
     renderEquityCurve(data.history);
     renderPriceMovement(data.history);

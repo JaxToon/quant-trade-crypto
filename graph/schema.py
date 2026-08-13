@@ -12,19 +12,33 @@ CONSTRAINTS = [
 
 INDEXES = [
     "CREATE INDEX token_updated IF NOT EXISTS FOR (t:Token) ON (t.updated_at)",
+    "CREATE INDEX token_asset_type IF NOT EXISTS FOR (t:Token) ON (t.asset_type)",
     "CREATE INDEX trade_outcome IF NOT EXISTS FOR (t:Trade) ON (t.outcome)",
     "CREATE INDEX trade_symbol IF NOT EXISTS FOR (t:Trade) ON (t.symbol)",
 ]
 
+# asset_type tags every Token so crypto and stock learning stay separable —
+# see graph/neo4j_client.get_all_tokens() and gnn/dataset.build_hetero_data(),
+# both of which filter by settings.ASSET_TYPE. Symbols don't collide between
+# the two lists, so both can be seeded unconditionally and safely coexist in
+# the same graph.
 SEED_TOKENS = [
-    ("BTCUSDT", "Bitcoin"),
-    ("ETHUSDT", "Ethereum"),
-    ("SOLUSDT", "Solana"),
-    ("BNBUSDT", "Binance Coin"),
-    ("XRPUSDT", "XRP"),
-    ("ADAUSDT", "Cardano"),
-    ("AVAXUSDT", "Avalanche"),
-    ("DOTUSDT", "Polkadot"),
+    ("BTCUSDT", "Bitcoin", "crypto"),
+    ("ETHUSDT", "Ethereum", "crypto"),
+    ("SOLUSDT", "Solana", "crypto"),
+    ("BNBUSDT", "Binance Coin", "crypto"),
+    ("XRPUSDT", "XRP", "crypto"),
+    ("ADAUSDT", "Cardano", "crypto"),
+    ("AVAXUSDT", "Avalanche", "crypto"),
+    ("DOTUSDT", "Polkadot", "crypto"),
+    ("AAPL", "Apple Inc.", "stock"),
+    ("MSFT", "Microsoft Corp.", "stock"),
+    ("GOOGL", "Alphabet Inc.", "stock"),
+    ("AMZN", "Amazon.com Inc.", "stock"),
+    ("NVDA", "NVIDIA Corp.", "stock"),
+    ("META", "Meta Platforms Inc.", "stock"),
+    ("TSLA", "Tesla Inc.", "stock"),
+    ("AVGO", "Broadcom Inc.", "stock"),
 ]
 
 SEED_PROTOCOLS = [
@@ -58,6 +72,12 @@ SEED_EDGES = [
     ("Token", "symbol", "ETHUSDT", "COMPETES_WITH", "Token", "symbol", "AVAXUSDT", 0.65),
     ("Token", "symbol", "ETHUSDT", "COMPETES_WITH", "Token", "symbol", "DOTUSDT", 0.65),
     ("Token", "symbol", "SOLUSDT", "COMPETES_WITH", "Token", "symbol", "AVAXUSDT", 0.60),
+    # Stocks COMPETES_WITH each other (big tech / semis rivalries)
+    ("Token", "symbol", "AAPL", "COMPETES_WITH", "Token", "symbol", "MSFT", 0.70),
+    ("Token", "symbol", "GOOGL", "COMPETES_WITH", "Token", "symbol", "META", 0.75),
+    ("Token", "symbol", "GOOGL", "COMPETES_WITH", "Token", "symbol", "AMZN", 0.60),
+    ("Token", "symbol", "AMZN", "COMPETES_WITH", "Token", "symbol", "MSFT", 0.55),
+    ("Token", "symbol", "NVDA", "COMPETES_WITH", "Token", "symbol", "AVGO", 0.70),
 ]
 
 
@@ -73,8 +93,8 @@ def initialize_schema() -> None:
         client.run_write(stmt)
 
     print("Seeding base token nodes...")
-    for symbol, name in SEED_TOKENS:
-        client.upsert_token(symbol, name)
+    for symbol, name, asset_type in SEED_TOKENS:
+        client.upsert_token(symbol, name, asset_type=asset_type)
 
     print("Seeding protocol nodes...")
     for pid, name in SEED_PROTOCOLS:

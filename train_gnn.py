@@ -26,12 +26,13 @@ from datetime import datetime
 
 import yfinance as yf
 
+from config import settings
 from gnn.dataset import TOKEN_FEATURES
 from gnn.trainer import GNNTrainer
 from strategy.smart_money import Candle, SmartMoneyAnalyzer
 
 # Binance symbol -> yfinance ticker (try multiple for each)
-SYMBOL_TICKERS = {
+CRYPTO_TICKERS = {
     "BTCUSDT": ["BTC-USD"],
     "ETHUSDT": ["ETH-USD"],
     "SOLUSDT": ["SOL-USD", "SOL1-USD"],
@@ -41,6 +42,13 @@ SYMBOL_TICKERS = {
     "AVAXUSDT": ["AVAX-USD"],
     "DOTUSDT": ["DOT-USD"],
 }
+
+# Stock tickers are already the yfinance ticker — no mapping needed. Kept as
+# {symbol: [ticker]} to match CRYPTO_TICKERS' shape so the rest of this
+# script doesn't need to know which asset class it's running.
+STOCK_TICKERS = {sym: [sym] for sym in settings.STOCK_WATCHLIST}
+
+SYMBOL_TICKERS = STOCK_TICKERS if settings.ASSET_TYPE == "stock" else CRYPTO_TICKERS
 
 YF_MAX_DAYS_5M = 60      # Yahoo Finance's hard limit for 5-minute-interval history
 STRIDE_CANDLES = 30      # spacing between training snapshots (~2.5h at 5m)
@@ -196,6 +204,7 @@ def build_symbol_series(symbol: str, tickers: list[str]) -> list[tuple[list[floa
 
 
 def main():
+    print(f"ASSET_TYPE={settings.ASSET_TYPE} — training on {list(SYMBOL_TICKERS.keys())}")
     print(f"Building historical training snapshots ({YF_MAX_DAYS_5M}d of 5m candles, real SMC replay)...\n")
     per_symbol: dict[str, list[tuple[list[float], float]]] = {}
     for symbol, tickers in SYMBOL_TICKERS.items():
