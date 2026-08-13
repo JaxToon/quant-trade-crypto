@@ -14,16 +14,25 @@ ledger (in-sample = first half, out-of-sample = second half) — a single
 combined win rate can't tell you whether the edge holds up on a period the
 strategy wasn't eyeballed against, or whether it was just one lucky window.
 
-GNN confluence is NOT applied here: entry_insight's GNN-agreement boost/veto
-needs a live GNN signal, and there's no point-in-time GNN snapshot to replay
-against historical candles (the graph doesn't have historical state). This
-backtest measures pure SMC/FVG signal quality; the GNN confluence effect can
-only be evaluated going forward, via main.py's live paper trading.
+By default gnn_signal is 0.0 for every symbol (pure SMC/FVG signal quality,
+no Neo4j/torch touched) — pass --with-gnn to layer in a real point-in-time
+GNN signal instead, recomputed at every candle from data available up to
+that point and run through the same trained model used live (see
+replay_lockstep and GNNTrainer.predict_from_features).
+
+All symbols are replayed in true lockstep (aligned by relative candle
+index), not one-symbol-fully-then-the-next — the portfolio correlated-risk
+cap needs genuine cross-symbol concurrency to evaluate correctly, and an
+earlier sequential-per-symbol design silently couldn't provide that: on an
+identical 30d/1h window it found 25 trades (689 blocked by the correlation
+cap, out of 2087 attempts) vs lockstep's 53 (551 blocked) — same signals,
+same candles, ~2x different trade count from execution order alone. See
+replay_lockstep's docstring for the full story.
 
 Uses separate, asset-type-tagged ledger files (backtrack_logs/backtest_ledger_*_{crypto,stock}.json)
 so it never touches the live paper-trading ledger main.py maintains.
 
-Usage: python backtest.py [--days N] [--timeframe 5m|15m|1h] [--segments N]
+Usage: python backtest.py [--days N] [--timeframe 5m|15m|1h] [--segments N] [--with-gnn]
 Days are capped per timeframe by Yahoo's own limits: 60d for 5m/15m,
 730d for 1h — see YF_MAX_DAYS below. --segments splits the fetched window
 into N equal chunks and reports each one separately (default 2, i.e. the
@@ -94,63 +103,45 @@ def fetch_candles(symbol: str, days: int, timeframe: str) -> list[Candle]:
     return []
 
 
-def replay_symbol(symbol: str, candles: list[Candle], ledger: PaperTradingLedger, timeframe: str) -> int:
+def replay_lockstep(
+    symbols_candles: dict[str, list[Candle]], ledger: PaperTradingLedger, timeframe: str, trainer=None,
+) -> int:
     """
-    Walks candles in order. At each closed candle: first check open paper
-    positions against that candle's [low, high] range (so a position opened
-    on candle t is only ever evaluated starting candle t+1 — no same-bar
-    look-ahead), THEN compute a fresh entry_insight and maybe open a new one.
+    Steps ALL symbols in true lockstep (aligned by relative candle index, not
+    calendar time — the same simplification train_gnn.py already accepts),
+    processing every symbol's close-check and open-attempt for a given step
+    before moving to the next step.
+
+    This matters beyond just enabling a real GNN signal (see trainer below):
+    replay_symbol's original per-symbol-sequential design (replay ALL of
+    BTCUSDT fully, THEN all of ETHUSDT, etc.) meant the portfolio correlated-
+    risk cap in paper_trading.py could only ever see ONE symbol's own
+    positions at a time — cross-symbol correlated exposure was structurally
+    invisible to it, even though main.py's live event loop processes all
+    symbols' real-time ticks genuinely concurrently. Measured on identical
+    30d/1h data: the old per-symbol-sequential design found 25 trades (689
+    rejected by the correlation cap, out of 2087 actionable attempts); this
+    lockstep replay found 53 (551 rejected) on the exact same candles, exact
+    same signals — a ~2x difference from execution order alone, not signal
+    quality. run_replay uses this engine exclusively now.
+
+    trainer: optional GNNTrainer. If given, RSI/MACD/Bollinger + SMC state
+    are recomputed from data available up to that candle only (no look-
+    ahead) and run through the SAME trained model used live, feeding a real
+    point-in-time GNN signal into build_entry_insight. If None (the default,
+    and what every non-GNN backtest run uses), gnn_signal is 0.0 for every
+    symbol and no Neo4j/torch is touched at all — same behavior as the old
+    hardcoded-0.0 path, just correctly lockstepped. Graph topology (edges,
+    Protocol/Macro_Event features) still comes from the live Neo4j graph and
+    is held fixed across the whole replay when a trainer IS given — there's
+    no historical snapshot of those to replay against either.
     """
-    smc = SmartMoneyAnalyzer(lookback=settings.SMC_LOOKBACK_CANDLES)
-    fvg = FairValueGapAnalyzer(max_fvgs=50, cluster_proximity=0.02)
-
-    n_candles = 0
-    for candle in candles:
-        # 1. Resolve any open positions against this candle's range FIRST.
-        ledger.check_and_close_ohlc(symbol, candle.low, candle.high, closed_at=candle.timestamp.isoformat(), timeframe=timeframe)
-
-        # 2. Update SMC/FVG state with this now-closed candle.
-        smc_signals = smc.update(candle)
-        candle_hist = list(smc.candles)
-        if len(candle_hist) >= 3:
-            fvg.detect_fvg(candles=candle_hist, index=len(candle_hist) - 2, current_price=candle.close, volume=candle.volume)
-        fvg.update_all(candle.close)
-
-        ms_trend = smc_signals.get("market_structure", "unknown")
-        fvg_signal = fvg.get_trading_signal(current_price=candle.close, trend=ms_trend)
-        smc_context = {**smc_signals, **fvg_signal, "timestamp": candle.timestamp.isoformat()}
-
-        # 3. Compute the same recommendation the live dashboard would show,
-        #    and let the ledger open a position off it (next candle onward).
-        #    gnn_signal=0.0: no point-in-time GNN snapshot exists for
-        #    historical candles — see module docstring.
-        insight = build_entry_insight(symbol, candle.close, smc_context, gnn_signal=0.0)
-        opened_at = candle.timestamp.isoformat()
-        ledger.maybe_open(symbol, "spot", insight["spot"], timeframe=timeframe, opened_at=opened_at)
-        ledger.maybe_open(symbol, "derivative", insight["derivative"], timeframe=timeframe, opened_at=opened_at)
-
-        n_candles += 1
-    return n_candles
-
-
-def replay_with_gnn(symbols_candles: dict[str, list[Candle]], ledger: PaperTradingLedger, timeframe: str, trainer) -> int:
-    """
-    Same walk-forward logic as replay_symbol, but ALL symbols are stepped in
-    lockstep (aligned by relative candle index, not calendar time — the same
-    simplification train_gnn.py already accepts) so a real point-in-time GNN
-    signal can be computed at every step: RSI/MACD/Bollinger + SMC state are
-    recomputed from data available up to that candle only (no look-ahead),
-    fed through the SAME trained model used live, and the resulting signal is
-    passed into build_entry_insight instead of the hardcoded 0.0 the default
-    path uses. Graph topology (edges, Protocol/Macro_Event features) still
-    comes from the live Neo4j graph and is held fixed across the whole replay
-    — there's no historical snapshot of those to replay against either.
-    """
-    from train_gnn import _rsi, _macd, _bollinger, _encode_market_structure  # local: keeps default backtest.py path torch-free
-
     smc_by_symbol = {sym: SmartMoneyAnalyzer(lookback=settings.SMC_LOOKBACK_CANDLES) for sym in symbols_candles}
     fvg_by_symbol = {sym: FairValueGapAnalyzer(max_fvgs=50, cluster_proximity=0.02) for sym in symbols_candles}
     closes_by_symbol: dict[str, list[float]] = {sym: [] for sym in symbols_candles}
+
+    if trainer is not None:
+        from train_gnn import _rsi, _macd, _bollinger, _encode_market_structure  # local: keeps the no-GNN path torch-free
 
     min_len = min((len(c) for c in symbols_candles.values()), default=0)
     n_candles = 0
@@ -170,34 +161,37 @@ def replay_with_gnn(symbols_candles: dict[str, list[Candle]], ledger: PaperTradi
             ms_trend = smc_signals.get("market_structure", "unknown")
             fvg_signal = fvg.get_trading_signal(current_price=candle.close, trend=ms_trend)
             smc_context_by_symbol[sym] = {**smc_signals, **fvg_signal, "timestamp": candle.timestamp.isoformat()}
-            closes_by_symbol[sym].append(candle.close)
+            if trainer is not None:
+                closes_by_symbol[sym].append(candle.close)
 
-        # Build the same 18-dim feature vector (TOKEN_FEATURES order) live
-        # inference feeds the model, for every symbol at this exact step —
-        # a joint forward pass is required since the GNN message-passes
-        # across all Token nodes at once.
-        features: dict[str, list[float]] = {}
-        for sym, candle in step_candles.items():
-            closes = closes_by_symbol[sym]
-            rsi = _rsi(closes)
-            macd, macd_signal, macd_hist = _macd(closes)
-            bb_upper, bb_mid, bb_lower = _bollinger(closes)
-            smc_signals = smc_context_by_symbol[sym]
-            tech = [candle.close, candle.volume, rsi, macd, macd_signal, macd_hist, bb_upper, bb_mid, bb_lower]
-            smc_feats = [
-                smc_signals.get("smc_signal", 0.0),
-                _encode_market_structure(smc_signals.get("market_structure", "unknown")),
-                float(smc_signals.get("active_order_blocks", 0)),
-                float(smc_signals.get("active_fvgs", 0)),
-                float(smc_signals.get("liquidity_zones", 0)),
-                1.0 if smc_signals.get("in_bullish_ob") else 0.0,
-                1.0 if smc_signals.get("in_bearish_ob") else 0.0,
-                1.0 if smc_signals.get("in_bullish_fvg") else 0.0,
-                1.0 if smc_signals.get("in_bearish_fvg") else 0.0,
-            ]
-            features[sym] = tech + smc_feats
-
-        gnn_signals = trainer.predict_from_features(features)
+        if trainer is not None:
+            # Build the same 18-dim feature vector (TOKEN_FEATURES order) live
+            # inference feeds the model, for every symbol at this exact step —
+            # a joint forward pass is required since the GNN message-passes
+            # across all Token nodes at once.
+            features: dict[str, list[float]] = {}
+            for sym, candle in step_candles.items():
+                closes = closes_by_symbol[sym]
+                rsi = _rsi(closes)
+                macd, macd_signal, macd_hist = _macd(closes)
+                bb_upper, bb_mid, bb_lower = _bollinger(closes)
+                smc_signals = smc_context_by_symbol[sym]
+                tech = [candle.close, candle.volume, rsi, macd, macd_signal, macd_hist, bb_upper, bb_mid, bb_lower]
+                smc_feats = [
+                    smc_signals.get("smc_signal", 0.0),
+                    _encode_market_structure(smc_signals.get("market_structure", "unknown")),
+                    float(smc_signals.get("active_order_blocks", 0)),
+                    float(smc_signals.get("active_fvgs", 0)),
+                    float(smc_signals.get("liquidity_zones", 0)),
+                    1.0 if smc_signals.get("in_bullish_ob") else 0.0,
+                    1.0 if smc_signals.get("in_bearish_ob") else 0.0,
+                    1.0 if smc_signals.get("in_bullish_fvg") else 0.0,
+                    1.0 if smc_signals.get("in_bearish_fvg") else 0.0,
+                ]
+                features[sym] = tech + smc_feats
+            gnn_signals = trainer.predict_from_features(features)
+        else:
+            gnn_signals = {sym: 0.0 for sym in step_candles}
 
         for sym, candle in step_candles.items():
             ledger.check_and_close_ohlc(sym, candle.low, candle.high, closed_at=candle.timestamp.isoformat(), timeframe=timeframe)
@@ -212,8 +206,16 @@ def replay_with_gnn(symbols_candles: dict[str, list[Candle]], ledger: PaperTradi
 
 def run_replay(
     symbols_candles: dict[str, list[Candle]], path: str, timeframe: str,
-    slippage_pct: float = 0.0, persist: bool = True,
+    slippage_pct: float = 0.0, persist: bool = True, trainer=None,
 ) -> tuple[PaperTradingLedger, int, int]:
+    """
+    The default replay path — lockstep across all symbols (see
+    replay_lockstep for why this matters: the portfolio correlation cap
+    needs genuine cross-symbol concurrency to be evaluated correctly, and
+    the old per-symbol-sequential design couldn't provide that). trainer is
+    None by default (gnn_signal=0.0 for everyone, no Neo4j/torch touched) —
+    pass a loaded GNNTrainer to layer in a real historical GNN signal.
+    """
     ledger = PaperTradingLedger(
         path=path, starting_balance=settings.PAPER_TRADING_STARTING_BALANCE, slippage_pct=slippage_pct,
     )
@@ -224,9 +226,7 @@ def run_replay(
     # a full historical replay — a backtest wants the true, untrimmed count.
     ledger.max_closed_trades = 1_000_000
 
-    total_candles = 0
-    for symbol, candles in symbols_candles.items():
-        total_candles += replay_symbol(symbol, candles, ledger, timeframe)
+    total_candles = replay_lockstep(symbols_candles, ledger, timeframe, trainer=trainer)
 
     # Anything still open at the end of the window never resolved — drop it
     # from the stats rather than counting it as a phantom win or loss.
@@ -237,33 +237,23 @@ def run_replay(
     return ledger, total_candles, open_count
 
 
-def run_replay_with_gnn(
-    symbols_candles: dict[str, list[Candle]], path: str, timeframe: str, trainer,
-) -> tuple[PaperTradingLedger, int, int]:
-    ledger = PaperTradingLedger(path=path, starting_balance=settings.PAPER_TRADING_STARTING_BALANCE)
-    ledger.balance = ledger.starting_balance
-    ledger.open_positions.clear()
-    ledger.closed_trades.clear()
-    ledger.max_closed_trades = 1_000_000
-
-    total_candles = replay_with_gnn(symbols_candles, ledger, timeframe, trainer)
-
-    open_count = len(ledger.open_positions)
-    ledger.open_positions.clear()
-    ledger.save()
-    return ledger, total_candles, open_count
-
-
 def run_gnn_ablation(symbols_candles: dict[str, list[Candle]], timeframe: str) -> None:
     """
     Runs the SAME full window through both paths — SMC-only (gnn_signal
-    hardcoded to 0.0, the default backtest behavior) and SMC+GNN (a real
-    point-in-time GNN signal recomputed at every candle from data available
-    up to that point, see replay_with_gnn) — and diffs the results, to
-    finally answer whether GNN confluence adds real edge over SMC/FVG alone
-    or is just adding noise on top of it. Every previous backtest in this
-    codebase used the SMC-only path; this is the first that replays a real
-    historical GNN signal instead of a hardcoded absence of one.
+    0.0) and SMC+GNN (a real point-in-time GNN signal recomputed at every
+    candle from data available up to that point) — and diffs the results,
+    to answer whether GNN confluence adds real edge over SMC/FVG alone or
+    is just adding noise on top of it.
+
+    Both paths use the SAME replay_lockstep engine, differing ONLY in
+    whether a trainer is passed — this used to compare the sequential
+    SMC-only path against the lockstep SMC+GNN path, which was confounding
+    "does GNN help" with "does lockstep vs sequential execution order
+    change the correlation cap's behavior" (it does, substantially — see
+    replay_lockstep's docstring). That confound is why an earlier run of
+    this comparison showed a 60.0% vs 62.3% win-rate gap that vanished
+    entirely (62.3% vs 62.3%, identical trade count) once execution order
+    was held constant and only the GNN signal was varied.
     """
     from gnn.trainer import GNNTrainer
 
@@ -276,8 +266,8 @@ def run_gnn_ablation(symbols_candles: dict[str, list[Candle]], timeframe: str) -
     smc_path = f"backtrack_logs/backtest_ledger_ablation_smc_{settings.ASSET_TYPE}_{timeframe}.json"
     gnn_path = f"backtrack_logs/backtest_ledger_ablation_gnn_{settings.ASSET_TYPE}_{timeframe}.json"
 
-    ledger_smc, candles_smc, open_smc = run_replay(symbols_candles, smc_path, timeframe)
-    ledger_gnn, candles_gnn, open_gnn = run_replay_with_gnn(symbols_candles, gnn_path, timeframe, trainer)
+    ledger_smc, candles_smc, open_smc = run_replay(symbols_candles, smc_path, timeframe, trainer=None)
+    ledger_gnn, candles_gnn, open_gnn = run_replay(symbols_candles, gnn_path, timeframe, trainer=trainer)
 
     print_report(f"SMC-ONLY (GNN disabled) [{timeframe}]", ledger_smc, candles_smc, open_smc)
     print_report(f"SMC + GNN confluence (real historical signal) [{timeframe}]", ledger_gnn, candles_gnn, open_gnn)
