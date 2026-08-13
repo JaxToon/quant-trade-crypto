@@ -9,6 +9,14 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# The driver logs a WARNING via this logger whenever a query references a
+# property key the DBMS hasn't seen on any node yet (e.g. Trade.timestamp
+# before the first Trade node is ever created) — a schema-awareness notice,
+# not a query error; run_read/run_write still succeed either way. Silenced
+# here since it's expected and reappears on every dashboard poll until the
+# first Trade node exists.
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+
 
 class Neo4jClient:
     """Thread-safe singleton wrapper around the Neo4j bolt driver."""
