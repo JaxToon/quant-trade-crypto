@@ -63,12 +63,20 @@ class PaperTradingLedger:
     entry_insight recommendations and tracks win rate over time.
     """
 
-    def __init__(self, path: str | None = None, starting_balance: float | None = None) -> None:
+    def __init__(
+        self, path: str | None = None, starting_balance: float | None = None, slippage_pct: float = 0.0,
+    ) -> None:
         # Separate file per asset class — crypto and stock win rates are
         # different markets and shouldn't be averaged into one stat.
         self.path = path or os.path.join(settings.BACKTRACK_LOG_DIR, f"paper_ledger_{settings.ASSET_TYPE}.json")
         self.starting_balance = starting_balance if starting_balance is not None else settings.PAPER_TRADING_STARTING_BALANCE
         self.balance = self.starting_balance
+        # Adverse slippage applied to BOTH legs of every fill (entry and
+        # exit) — 0.0 in live/default use (see backtrack_logs vs backtest.py
+        # docstrings). backtest.py sweeps this to find the level at which
+        # the backtested edge stops being profitable, since neither the
+        # live ledger nor the backtest otherwise model real order-book depth.
+        self.slippage_pct = slippage_pct
         self.open_positions: dict[tuple[str, str, str], PaperPosition] = {}
         self.closed_trades: list[dict] = []
         self.last_learned_count = 0  # index into closed_trades already used for GNN updates
@@ -124,12 +132,22 @@ class PaperTradingLedger:
 
     # ── Trading ────────────────────────────────────────────────────────────
 
-    def maybe_open(self, symbol: str, market: str, rec: dict, timeframe: str = "5m") -> str | None:
+    def maybe_open(
+        self, symbol: str, market: str, rec: dict, timeframe: str = "5m", opened_at: str | None = None,
+    ) -> str | None:
         """
         rec: a `spot` or `derivative` block from entry_insight.build_entry_insight.
         timeframe: which SMC/FVG layer this signal came from (e.g. "5m",
         "15m", "1h") — kept as a separate position key so the same symbol
         can have independent open positions per layer simultaneously.
+        opened_at: simulated candle time for backtest replay — omit for live
+        use, where "now" (wall-clock) is correct. backtest.py MUST pass this
+        (the candle's own timestamp), otherwise every backtested position
+        records today's real time as when it opened, silently breaking any
+        analysis that needs real trade duration or time-overlap between
+        positions (found via exactly that: an overlap analysis that should
+        have found concurrent positions found none, because every "opened_at"
+        was hours in the future relative to its own "closed_at").
 
         Returns None if a position was opened, or if there was nothing to do
         (no signal, already open). Returns a short human-readable reason if
@@ -148,6 +166,11 @@ class PaperTradingLedger:
             return None
 
         entry_price = sum(entry_zone) / 2
+        direction = rec.get("direction", "long")
+        if self.slippage_pct:
+            # Adverse fill: pay more to get long, receive less to get short.
+            entry_price *= (1 + self.slippage_pct) if direction == "long" else (1 - self.slippage_pct)
+
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < entry_price * MIN_STOP_DISTANCE_PCT:
             stop_pct = stop_distance / entry_price * 100
@@ -184,7 +207,6 @@ class PaperTradingLedger:
         # version of the same trade — MAX_NOTIONAL_MULTIPLE below is still
         # the hard backstop regardless of how this multiplier is computed.
         leverage = max(1.0, float(rec.get("suggested_leverage", 1)))
-        direction = rec.get("direction", "long")
         liquidation_price = None
         if market == "derivative":
             risk_amount *= leverage ** 0.5
@@ -214,6 +236,7 @@ class PaperTradingLedger:
             confidence=rec.get("confidence", 0.0),
             timeframe=timeframe,
             liquidation_price=liquidation_price,
+            **({"opened_at": opened_at} if opened_at else {}),
         )
         self.open_positions[key] = pos
         liq_note = f" | liq={liquidation_price:.6f}" if liquidation_price else ""
@@ -286,6 +309,11 @@ class PaperTradingLedger:
         self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str,
         closed_at: str | None, liquidated: bool = False,
     ) -> None:
+        if self.slippage_pct:
+            # Adverse fill on the way out too: a long sells for less, a
+            # short buys back for more than the theoretical SL/TP/liq price.
+            exit_price *= (1 - self.slippage_pct) if pos.direction == "long" else (1 + self.slippage_pct)
+
         sign = 1 if pos.direction == "long" else -1
         gross_pnl_dollars = pos.quantity * (exit_price - pos.entry_price) * sign
         # Round-trip fee on both entry and exit notional — "win" / "loss"
