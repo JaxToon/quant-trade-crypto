@@ -53,6 +53,7 @@ class PaperPosition:
     leverage: float
     confidence: float
     timeframe: str = "5m"  # which SMC/FVG layer this signal came from
+    liquidation_price: float | None = None  # derivative only — None for spot
     opened_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -173,10 +174,30 @@ class PaperTradingLedger:
         conviction_multiplier = 1.0 + (confidence / 100.0) * (max_mult - 1.0)
 
         risk_amount = self.starting_balance * settings.PAPER_TRADING_RISK_PCT * conviction_multiplier
+
+        # Derivative gets a modest, damped bump on top of conviction scaling
+        # — real leverage doesn't make a risk-sized trade bigger (that's the
+        # whole point of sizing by fixed $ risk), it makes the SAME risk
+        # cheaper to hold in margin. We're not modeling margin/capital here,
+        # so this is a deliberate, bounded stand-in: sqrt(leverage), not
+        # leverage itself, so a "3x" market doesn't just recreate a 3x-bigger
+        # version of the same trade — MAX_NOTIONAL_MULTIPLE below is still
+        # the hard backstop regardless of how this multiplier is computed.
+        leverage = max(1.0, float(rec.get("suggested_leverage", 1)))
+        direction = rec.get("direction", "long")
+        liquidation_price = None
+        if market == "derivative":
+            risk_amount *= leverage ** 0.5
+            liquidation_price = (
+                entry_price * (1 - 1 / leverage) if direction == "long"
+                else entry_price * (1 + 1 / leverage)
+            )
+
         quantity = risk_amount / stop_distance
 
         # Hard cap regardless — a tight-but-not-rejected stop combined with
-        # a much wider target can still produce an unrealistic win size.
+        # a much wider target (or the derivative bump above) can still
+        # produce an unrealistic position size.
         max_notional = self.starting_balance * MAX_NOTIONAL_MULTIPLE
         if quantity * entry_price > max_notional:
             quantity = max_notional / entry_price
@@ -184,20 +205,22 @@ class PaperTradingLedger:
         pos = PaperPosition(
             symbol=symbol,
             market=market,
-            direction=rec.get("direction", "long"),
+            direction=direction,
             entry_price=entry_price,
             stop_loss=stop_loss,
             target=target,
             quantity=quantity,
-            leverage=rec.get("suggested_leverage", 1),
+            leverage=leverage,
             confidence=rec.get("confidence", 0.0),
             timeframe=timeframe,
+            liquidation_price=liquidation_price,
         )
         self.open_positions[key] = pos
+        liq_note = f" | liq={liquidation_price:.6f}" if liquidation_price else ""
         logger.info(
-            "PAPER OPEN %s %s %s [%s] @ %.6f | SL=%.6f TP=%.6f qty=%.4f | conviction=%.2fx (confidence=%.0f%%)",
+            "PAPER OPEN %s %s %s [%s] @ %.6f | SL=%.6f TP=%.6f qty=%.4f | conviction=%.2fx (confidence=%.0f%%)%s",
             market, pos.direction.upper(), symbol, timeframe, entry_price, stop_loss, target, quantity,
-            conviction_multiplier, confidence,
+            conviction_multiplier, confidence, liq_note,
         )
         return None
 
@@ -207,6 +230,14 @@ class PaperTradingLedger:
             price = current_prices.get(pos.symbol)
             if price is None:
                 continue
+
+            # Liquidation (derivative only) takes priority — it's the more
+            # severe, exchange-forced outcome if it's ever actually reached.
+            if pos.liquidation_price is not None:
+                hit_liq = price <= pos.liquidation_price if pos.direction == "long" else price >= pos.liquidation_price
+                if hit_liq:
+                    self._close(key, pos, pos.liquidation_price, "loss", closed_at=None, liquidated=True)
+                    continue
 
             if pos.direction == "long":
                 hit_sl, hit_tp = price <= pos.stop_loss, price >= pos.target
@@ -236,6 +267,12 @@ class PaperTradingLedger:
                 if timeframe is not None and pos.timeframe != timeframe:
                     continue
 
+                if pos.liquidation_price is not None:
+                    hit_liq = low <= pos.liquidation_price if pos.direction == "long" else high >= pos.liquidation_price
+                    if hit_liq:
+                        self._close(key, pos, pos.liquidation_price, "loss", closed_at=closed_at, liquidated=True)
+                        continue
+
                 if pos.direction == "long":
                     hit_sl, hit_tp = low <= pos.stop_loss, high >= pos.target
                 else:  # short
@@ -245,7 +282,10 @@ class PaperTradingLedger:
                     exit_price = pos.stop_loss if hit_sl else pos.target
                     self._close(key, pos, exit_price, "loss" if hit_sl else "win", closed_at=closed_at)
 
-    def _close(self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str, closed_at: str | None) -> None:
+    def _close(
+        self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str,
+        closed_at: str | None, liquidated: bool = False,
+    ) -> None:
         sign = 1 if pos.direction == "long" else -1
         gross_pnl_dollars = pos.quantity * (exit_price - pos.entry_price) * sign
         # Round-trip fee on both entry and exit notional — "win" / "loss"
@@ -262,7 +302,7 @@ class PaperTradingLedger:
             "entry_price": pos.entry_price, "exit_price": exit_price,
             "pnl_dollars": round(pnl_dollars, 4), "pnl_pct": round(pnl_pct, 4),
             "fee_dollars": round(fee_dollars, 4),
-            "outcome": outcome, "opened_at": pos.opened_at,
+            "outcome": outcome, "liquidated": liquidated, "opened_at": pos.opened_at,
             "closed_at": closed_at or datetime.utcnow().isoformat(),
         })
         # Cap in-memory history; keep last_learned_count valid against the trim.
@@ -272,10 +312,11 @@ class PaperTradingLedger:
             self.last_learned_count = max(0, self.last_learned_count - overflow)
 
         del self.open_positions[key]
+        tag = "LIQUIDATED" if liquidated else outcome.upper()
         logger.info(
             "PAPER CLOSE %s %s %s @ %.6f | %s | PnL=$%.2f (%.2f%%) | balance=$%.2f",
             pos.market, pos.direction.upper(), pos.symbol, exit_price,
-            outcome.upper(), pnl_dollars, pnl_pct * 100, self.balance,
+            tag, pnl_dollars, pnl_pct * 100, self.balance,
         )
 
     # ── Continual learning hook ────────────────────────────────────────────
@@ -293,10 +334,12 @@ class PaperTradingLedger:
         def _breakdown(trades: list[dict]) -> dict:
             n = len(trades)
             wins = sum(1 for t in trades if t["outcome"] == "win")
+            liquidations = sum(1 for t in trades if t.get("liquidated"))
             return {
                 "trades": n,
                 "wins": wins,
                 "losses": n - wins,
+                "liquidations": liquidations,
                 "win_rate_pct": round(100 * wins / n, 1) if n else None,
                 "total_pnl_dollars": round(sum(t["pnl_dollars"] for t in trades), 2),
             }
