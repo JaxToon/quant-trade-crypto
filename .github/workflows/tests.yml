@@ -1,0 +1,25 @@
+name: Tests
+
+# Runs the tests/ suite on every push and PR. Deliberately installs only
+# python-dotenv + pytest, not the full requirements.txt (torch, torch-
+# geometric, transformers, spacy) — the covered modules (strategy/
+# entry_insight.py, backtrack/paper_trading.py, strategy/correlation.py)
+# don't import any of that, and keeping CI fast matters more here than
+# exercising the full dependency stack, which none of these tests touch
+# anyway (no Neo4j, no GPU, no live API keys required).
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal test dependencies
+        run: pip install pytest python-dotenv
+      - name: Run tests
+        run: python -m pytest tests/ -v
