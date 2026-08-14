@@ -292,6 +292,113 @@ def run_gnn_ablation(symbols_candles: dict[str, list[Candle]], timeframe: str) -
     print(f"{'=' * 60}")
 
 
+def run_multitimeframe(symbols: list[str], days: int, path: str) -> None:
+    """
+    Every other backtest mode in this file replays ONE timeframe at a time —
+    fine for measuring win rate, but it means none of them have ever tested
+    the condition main.py actually runs live: 5m + 15m + 1h streaming and
+    trading THE SAME symbol simultaneously (BINANCE_SMC_TIMEFRAMES). A
+    symbol can structurally have up to 6 concurrent positions (3 timeframes
+    x spot/derivative) — this replay is the only one that can tell us
+    whether that ceiling is actually reached in practice, or whether the
+    portfolio correlation cap (which treats get_correlation(symbol,symbol)
+    == 1.0 regardless of timeframe) already keeps it in check.
+
+    Builds one merged, globally time-sorted event queue across every
+    (symbol, timeframe) candle stream — NOT index-lockstep like
+    replay_lockstep, since 5m/15m/1h candles close at different real
+    cadences and can't be aligned by position. Each event updates that
+    (symbol, timeframe)'s own independent SMC/FVG analyzer state, closes
+    any due positions for that (symbol, timeframe) only, then evaluates a
+    fresh entry. gnn_signal is 0.0 throughout (already shown to have
+    negligible effect — see run_gnn_ablation) to keep this focused on the
+    position-count question alone.
+    """
+    from collections import defaultdict
+
+    timeframes = settings.BINANCE_SMC_TIMEFRAMES
+    print(f"Fetching {days}d x {timeframes} for {len(symbols)} symbols (this is 3x the usual fetch volume)...\n")
+
+    candles_by_symbol_tf: dict[tuple[str, str], list[Candle]] = {}
+    for symbol in symbols:
+        for tf in timeframes:
+            candles = fetch_candles(symbol, days, tf)
+            if candles:
+                candles_by_symbol_tf[(symbol, tf)] = candles
+                print(f"  {symbol} [{tf}]: {len(candles)} candles")
+
+    # Global event queue, sorted by real timestamp across everything.
+    events: list[tuple] = []  # (timestamp, symbol, timeframe, candle)
+    for (symbol, tf), candles in candles_by_symbol_tf.items():
+        for candle in candles:
+            events.append((candle.timestamp, symbol, tf, candle))
+    events.sort(key=lambda e: e[0])
+    print(f"\n{len(events)} total candle-close events across all symbols/timeframes, merged chronologically.\n")
+
+    ledger = PaperTradingLedger(path=path, starting_balance=settings.PAPER_TRADING_STARTING_BALANCE)
+    ledger.balance = ledger.starting_balance
+    ledger.open_positions.clear()
+    ledger.closed_trades.clear()
+    ledger.max_closed_trades = 1_000_000
+
+    smc_by_key = {k: SmartMoneyAnalyzer(lookback=settings.SMC_LOOKBACK_CANDLES) for k in candles_by_symbol_tf}
+    fvg_by_key = {k: FairValueGapAnalyzer(max_fvgs=50, cluster_proximity=0.02) for k in candles_by_symbol_tf}
+
+    for timestamp, symbol, tf, candle in events:
+        key = (symbol, tf)
+        ledger.check_and_close_ohlc(symbol, candle.low, candle.high, closed_at=timestamp.isoformat(), timeframe=tf)
+
+        smc, fvg = smc_by_key[key], fvg_by_key[key]
+        smc_signals = smc.update(candle)
+        candle_hist = list(smc.candles)
+        if len(candle_hist) >= 3:
+            fvg.detect_fvg(candles=candle_hist, index=len(candle_hist) - 2, current_price=candle.close, volume=candle.volume)
+        fvg.update_all(candle.close)
+        ms_trend = smc_signals.get("market_structure", "unknown")
+        fvg_signal = fvg.get_trading_signal(current_price=candle.close, trend=ms_trend)
+        smc_context = {**smc_signals, **fvg_signal, "timestamp": timestamp.isoformat()}
+
+        insight = build_entry_insight(symbol, candle.close, smc_context, gnn_signal=0.0)
+        opened_at = timestamp.isoformat()
+        ledger.maybe_open(symbol, "spot", insight["spot"], timeframe=tf, opened_at=opened_at)
+        ledger.maybe_open(symbol, "derivative", insight["derivative"], timeframe=tf, opened_at=opened_at)
+
+    open_count = len(ledger.open_positions)
+    ledger.open_positions.clear()
+    ledger.save()
+
+    stats = ledger.stats()
+    print_report(f"MULTI-TIMEFRAME [{'+'.join(timeframes)}] ({days}d, all timeframes concurrent)", ledger, len(events), open_count)
+
+    # Peak concurrent SAME-SYMBOL positions across ALL timeframes at once —
+    # the actual number this whole exercise exists to measure.
+    per_symbol_events = defaultdict(list)
+    for t in ledger.closed_trades:
+        per_symbol_events[t["symbol"]].append((t["opened_at"], 1))
+        per_symbol_events[t["symbol"]].append((t["closed_at"], -1))
+
+    print(f"\n{'=' * 60}")
+    print("SAME-SYMBOL CONCURRENCY ACROSS ALL TIMEFRAMES")
+    print(f"{'=' * 60}")
+    max_peak = 0
+    for sym, evs in sorted(per_symbol_events.items()):
+        evs.sort()
+        cur = peak = 0
+        for _, delta in evs:
+            cur += delta
+            peak = max(peak, cur)
+        max_peak = max(max_peak, peak)
+        print(f"  {sym}: peak concurrent positions = {peak}")
+    print(f"\nOverall peak (any single symbol, any moment): {max_peak}")
+    if max_peak <= 2:
+        print("Portfolio correlation cap already keeps same-symbol concurrency low across all 3 timeframes.")
+        print("No additional per-symbol position-count cap appears necessary.")
+    else:
+        print(f"Same-symbol concurrency reaches {max_peak} — above the 2 (spot+derivative) seen in single-timeframe")
+        print("backtests. This is evidence a per-symbol position-count cap would meaningfully change behavior.")
+    print(f"{'=' * 60}")
+
+
 # Adverse slippage applied to both legs of every fill — real friction the
 # rest of this backtest doesn't otherwise model (no order-book depth).
 SLIPPAGE_SWEEP_LEVELS = [0.0, 0.0002, 0.0005, 0.001, 0.0015, 0.002, 0.003]
@@ -382,8 +489,25 @@ def main() -> None:
              "timeframe and more segments to check whether the edge holds across "
              "multiple market regimes rather than one stretch.",
     )
+    parser.add_argument(
+        "--multi-timeframe", action="store_true",
+        help="Replay 5m+15m+1h concurrently per symbol (matching main.py's real live "
+             "condition) instead of one timeframe in isolation, and report peak "
+             "same-symbol concurrent positions across all three at once. --days is "
+             "capped at 60 (the 5m/15m limit) regardless of --timeframe.",
+    )
     args = parser.parse_args()
     timeframe = args.timeframe
+
+    if args.multi_timeframe:
+        days = min(args.days if args.days is not None else settings.BACKTEST_DAYS, YF_MAX_DAYS["5m"])
+        print(f"ASSET_TYPE={settings.ASSET_TYPE} — {len(settings.WATCHLIST)} symbols: {settings.WATCHLIST}")
+        run_multitimeframe(
+            settings.WATCHLIST, days,
+            path=f"backtrack_logs/backtest_ledger_multitimeframe_{settings.ASSET_TYPE}.json",
+        )
+        return
+
     max_days = YF_MAX_DAYS.get(timeframe, YF_MAX_DAYS_5M)
     requested_days = args.days if args.days is not None else min(settings.BACKTEST_DAYS, max_days)
     days = min(requested_days, max_days)
