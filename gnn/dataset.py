@@ -11,6 +11,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from config import settings
+from gnn.feature_norm import load_feature_norm, normalize_feature_rows
 from graph.neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,15 @@ def build_hetero_data(asset_type: str | None = None) -> tuple[HeteroData, dict[s
         token_feats.append(feats)
 
     if token_feats:
+        # Opt-in per asset_type: only normalizes if that asset class has been
+        # (re)trained with gnn/feature_norm.py stats saved. No file -> raw
+        # features, unchanged from before — this is what keeps an
+        # already-working asset class's live inference byte-for-byte
+        # identical unless it's deliberately retrained with normalization.
+        norm = load_feature_norm(asset_type)
+        if norm is not None:
+            means, stds = norm
+            token_feats = normalize_feature_rows(token_feats, means, stds)
         data["Token"].x = torch.tensor(token_feats, dtype=torch.float)
         data["Token"].symbol = [dict(row["t"]).get("symbol", "") for row in tokens]
     else:
