@@ -207,16 +207,24 @@ class TradingViewStream:
             await asyncio.sleep(self._get_poll_interval())
 
     def _get_poll_interval(self) -> int:
-        """Get polling interval in seconds based on chart timeframe."""
-        if self.interval == "1m":
+        """Get polling interval in seconds based on chart timeframe.
+
+        Was comparing self.interval (an Interval ENUM once tradingview_ta
+        is installed and _parse_interval succeeds) against string literals
+        — never once true, so this always silently fell through to the 60s
+        default regardless of TRADINGVIEW_INTERVAL. Fixed to compare
+        self.interval_str instead, the raw string kept alongside the parsed
+        enum specifically for cases like this (also used to tag ticks with
+        their timeframe — see _is_new_bar and the "interval" key below)."""
+        if self.interval_str == "1m":
             return 10  # Poll every 10 seconds for 1m charts
-        elif self.interval == "5m":
+        elif self.interval_str == "5m":
             return 30
-        elif self.interval == "15m":
+        elif self.interval_str == "15m":
             return 60
-        elif self.interval == "1h":
+        elif self.interval_str == "1h":
             return 300  # 5 minutes
-        elif self.interval == "4h":
+        elif self.interval_str == "4h":
             return 900  # 15 minutes
         else:
             return 60  # Default 1 minute
