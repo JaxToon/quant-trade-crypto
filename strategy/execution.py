@@ -5,9 +5,11 @@ Enforces hard position limits and daily drawdown circuit breaker.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, date
 from typing import Optional
 
@@ -18,6 +20,8 @@ from graph.neo4j_client import Neo4jClient
 from strategy.consensus import TradeDecision
 
 logger = logging.getLogger(__name__)
+
+POSITIONS_STATE_PATH = os.path.join("backtrack_logs", "execution_open_positions.json")
 
 
 @dataclass
@@ -48,7 +52,47 @@ class ExecutionEngine:
         self._daily_pnl: float = 0.0
         self._trading_day: date = date.today()
         self._halted: bool = False
-        logger.info("ExecutionEngine ready. Testnet=%s", settings.BINANCE_TESTNET)
+        self._load_positions()
+        logger.info(
+            "ExecutionEngine ready. Testnet=%s | %d open position(s) restored",
+            settings.BINANCE_TESTNET, len(self._open_positions),
+        )
+
+    # ── Persistence ────────────────────────────────────────────────────────
+    # _open_positions used to be purely in-memory — any real order this
+    # engine ever placed would silently lose tracking on restart (still open
+    # on the exchange, but never checked for SL/TP again and never logged to
+    # Neo4j on close). Never actually bit us because the HMM regime bug kept
+    # bear_veto_active pinned true for this system's entire history, so this
+    # path never placed a single order — but now that it's unblocked, a
+    # restart-without-persistence here would orphan a real position.
+
+    def _load_positions(self) -> None:
+        if not os.path.exists(POSITIONS_STATE_PATH):
+            return
+        try:
+            with open(POSITIONS_STATE_PATH) as f:
+                data = json.load(f)
+            for row in data:
+                row = dict(row)
+                row["opened_at"] = datetime.fromisoformat(row["opened_at"])
+                pos = Position(**row)
+                self._open_positions[pos.symbol] = pos
+        except Exception as exc:
+            logger.warning("Execution position state load failed, starting fresh: %s", exc)
+
+    def _save_positions(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(POSITIONS_STATE_PATH), exist_ok=True)
+            rows = []
+            for pos in self._open_positions.values():
+                row = asdict(pos)
+                row["opened_at"] = pos.opened_at.isoformat()
+                rows.append(row)
+            with open(POSITIONS_STATE_PATH, "w") as f:
+                json.dump(rows, f, indent=2)
+        except Exception as exc:
+            logger.warning("Execution position state save failed: %s", exc)
 
     def _reset_daily_if_needed(self) -> None:
         today = date.today()
@@ -161,6 +205,7 @@ class ExecutionEngine:
                 order_id=order_id,
             )
             self._open_positions[decision.symbol] = pos
+            self._save_positions()
             logger.info(
                 "OPENED %s %s qty=%.5f @ %.4f | SL=%.4f TP=%.4f",
                 decision.direction, decision.symbol, quantity, fill_price, sl_price, tp_price,
@@ -175,6 +220,7 @@ class ExecutionEngine:
         pos = self._open_positions.pop(symbol, None)
         if pos is None:
             return
+        self._save_positions()
 
         if pos.direction == "LONG":
             pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
