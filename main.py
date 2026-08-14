@@ -79,7 +79,13 @@ _paper_ledger = PaperTradingLedger() if settings.PAPER_TRADING_ENABLED else None
 # This is NOT the model's learning (that's the GNN checkpoint + paper
 # ledger, both already persisted); it's purely the dashboard's memory of
 # what happened, across however many runs you've done.
-HISTORY_FILE = os.path.join("dashboard", "history.json")
+# Asset-type-suffixed so a crypto process and a stock process can run
+# simultaneously without silently overwriting each other's dashboard state
+# (found while checking feasibility of running both at once — these three
+# files, plus dashboard/api.py's STATUS_FILE, were the only genuinely
+# shared/colliding paths; GNN checkpoints and paper ledgers were already
+# namespaced by asset type).
+HISTORY_FILE = os.path.join("dashboard", f"history_{settings.ASSET_TYPE}.json")
 MAX_HISTORY_POINTS = 5000
 
 
@@ -112,7 +118,7 @@ _history: list[dict] = _load_history()
 # afternoon of samples — this history exists so it CAN be evidence-based
 # once enough real decisions have accumulated, instead of requiring a manual
 # grep through trader.log every time the question comes up.
-CONSENSUS_HISTORY_FILE = os.path.join("dashboard", "consensus_history.json")
+CONSENSUS_HISTORY_FILE = os.path.join("dashboard", f"consensus_history_{settings.ASSET_TYPE}.json")
 MAX_CONSENSUS_HISTORY_POINTS = 2000
 
 
@@ -289,7 +295,7 @@ def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
                 "stats": _consensus_stats(),
             },
         }
-        with open("dashboard/status.json", "w") as f:
+        with open(f"dashboard/status_{settings.ASSET_TYPE}.json", "w") as f:
             json.dump(payload, f)
     except Exception:
         pass
