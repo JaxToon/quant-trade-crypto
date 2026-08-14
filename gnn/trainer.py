@@ -29,6 +29,20 @@ class GNNTrainer:
         logger.info("GNN using device: %s", self.device)
         self.model: Optional[HGTSignalModel] = None
         self._index_maps: dict | None = None
+        # True only once self.model holds meaningfully trained weights (a
+        # successful load() or a completed train()/train_on_history()) — NOT
+        # just "self.model is not None". main.py calls build_model() before
+        # load() (to lazy-init the Linear(-1,...) layers even in the
+        # no-checkpoint-yet case), which leaves self.model non-None with
+        # random weights even when load() then fails. predict()/predict_all()
+        # used to guard on `self.model is None`, so that pre-build made the
+        # "return zero signal" fallback unreachable — a failed load (missing
+        # file, or a stale checkpoint incompatible with the current graph's
+        # edge types, both confirmed to happen) silently ran live inference
+        # on untrained random-weight noise while logging that it was
+        # returning zero signal. Gating on this flag instead makes that
+        # fallback actually reachable regardless of call order.
+        self._ready = False
 
     # ── Model lifecycle ────────────────────────────────────────────────────
 
@@ -84,6 +98,7 @@ class GNNTrainer:
         # meaningless predictions.
         path = path or os.path.join(settings.MODEL_CHECKPOINT_DIR, f"hgt_latest_{settings.ASSET_TYPE}.pt")
         if not os.path.exists(path):
+            self._ready = False
             return False
         if self.model is None:
             self.build_model()
@@ -95,8 +110,10 @@ class GNNTrainer:
                 "(%s) — ignoring stale checkpoint and running with zero signal until retrained.",
                 path, exc,
             )
+            self._ready = False
             return False
         logger.info("Model loaded from %s", path)
+        self._ready = True
         return True
 
     # ── Training ───────────────────────────────────────────────────────────
@@ -142,6 +159,7 @@ class GNNTrainer:
                             scheduler.get_last_lr()[0],
                             float(out.detach().min()), float(out.detach().max()))
 
+        self._ready = True
         return final_loss
 
     def train_on_history(self, samples: list[dict], epochs: int | None = None) -> float:
@@ -206,6 +224,7 @@ class GNNTrainer:
                     epoch + 1, epochs, final_loss, scheduler.get_last_lr()[0], len(prepared),
                 )
 
+        self._ready = True
         return final_loss
 
     # ── Inference ──────────────────────────────────────────────────────────
@@ -215,7 +234,7 @@ class GNNTrainer:
         Returns the GNN directional signal for a single symbol ∈ [-1, +1].
         Positive → bullish, Negative → bearish.
         """
-        if self.model is None:
+        if not self._ready:
             if not self.load():
                 logger.warning("No trained model found; returning 0.0 signal")
                 return 0.0
@@ -234,7 +253,7 @@ class GNNTrainer:
 
     def predict_all(self) -> dict[str, float]:
         """Returns {symbol → signal} for all watched tokens."""
-        if self.model is None:
+        if not self._ready:
             if not self.load():
                 return {sym: 0.0 for sym in settings.WATCHLIST}
 
@@ -264,7 +283,7 @@ class GNNTrainer:
         features: {symbol: [18 floats, TOKEN_FEATURES order]}
         Returns {symbol: signal ∈ [-1, +1]} for every symbol in `features`.
         """
-        if self.model is None:
+        if not self._ready:
             if not self.load():
                 logger.warning("No trained model found; returning 0.0 signal for all symbols")
                 return {sym: 0.0 for sym in features}
@@ -294,7 +313,7 @@ class GNNTrainer:
         self, symbol: str
     ) -> dict:
         """Returns raw attention weights from the last conv layer (for backtrack)."""
-        if self.model is None:
+        if not self._ready:
             return {}
         data, _ = build_hetero_data()
         self.model.eval()
