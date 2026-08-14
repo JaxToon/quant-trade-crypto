@@ -99,6 +99,71 @@ def _load_history() -> list[dict]:
 
 _history: list[dict] = _load_history()
 
+# Separate from _history above (that's paper-trading/price data). This is
+# the LLM-consensus path's own decision history — added after auditing that
+# path and finding it had been completely blocked since the system started
+# (an HMM regime bug pinned bear_veto_active true 100% of the time; see
+# risk/hmm_regime.py's fix). Once unblocked, every P(Trade) evaluation came
+# back well under TRADE_THRESHOLD — the formula's own mathematical ceiling
+# (W1_BULL - 0, at Bull=1/Bear=0/C_Risk=0) is only 0.6, so a 0.55 threshold
+# sits in roughly the top 8% of its whole possible range. Whether that's
+# genuinely well-calibrated (this path has never closed a single trade, so
+# there's no outcome data either way) isn't something to guess at from one
+# afternoon of samples — this history exists so it CAN be evidence-based
+# once enough real decisions have accumulated, instead of requiring a manual
+# grep through trader.log every time the question comes up.
+CONSENSUS_HISTORY_FILE = os.path.join("dashboard", "consensus_history.json")
+MAX_CONSENSUS_HISTORY_POINTS = 2000
+
+
+def _load_consensus_history() -> list[dict]:
+    if not os.path.exists(CONSENSUS_HISTORY_FILE):
+        return []
+    try:
+        with open(CONSENSUS_HISTORY_FILE) as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Consensus decision history load failed, starting fresh: %s", exc)
+        return []
+
+
+_consensus_history: list[dict] = _load_consensus_history()
+
+
+def _record_consensus_decision(decision) -> None:
+    _consensus_history.append({
+        "timestamp": datetime.utcnow().isoformat(),
+        "symbol": decision.symbol,
+        "p_trade": decision.p_trade,
+        "bull_score": decision.debate.bull_score,
+        "bear_score": decision.debate.bear_score,
+        "c_risk": decision.debate.c_risk,
+        "execute": decision.execute,
+        "direction": decision.direction,
+    })
+    if len(_consensus_history) > MAX_CONSENSUS_HISTORY_POINTS:
+        del _consensus_history[: len(_consensus_history) - MAX_CONSENSUS_HISTORY_POINTS]
+    try:
+        with open(CONSENSUS_HISTORY_FILE, "w") as f:
+            json.dump(_consensus_history, f)
+    except Exception as exc:
+        logger.debug("Consensus decision history save failed: %s", exc)
+
+
+def _consensus_stats() -> dict:
+    if not _consensus_history:
+        return {"count": 0}
+    p_trades = [d["p_trade"] for d in _consensus_history]
+    executed = sum(1 for d in _consensus_history if d["execute"])
+    return {
+        "count": len(_consensus_history),
+        "executed": executed,
+        "max_p_trade": round(max(p_trades), 4),
+        "mean_p_trade": round(sum(p_trades) / len(p_trades), 4),
+        "trade_threshold": settings.TRADE_THRESHOLD,
+        "formula_ceiling": round(settings.W1_BULL, 4),  # max possible: W1_BULL*1 - W2_BEAR*0 - 0
+    }
+
 
 def _validate_config() -> None:
     missing = []
@@ -219,6 +284,10 @@ def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
             "entry_insights": insights,
             "paper_trade_rejections": paper_trade_rejections,
             "paper_trading": _paper_ledger.stats() if _paper_ledger else None,
+            "consensus_decisions": {
+                "recent": _consensus_history[-50:],
+                "stats": _consensus_stats(),
+            },
         }
         with open("dashboard/status.json", "w") as f:
             json.dump(payload, f)
@@ -268,6 +337,7 @@ def decision_loop(
             bear_veto=circuit.bear_veto_active,
             smc_context=indicators.get('smc'),  # Extract SMC data from enriched indicators
         )
+        _record_consensus_decision(decision)
 
         if decision.execute:
             execution.execute(decision)

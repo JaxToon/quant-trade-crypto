@@ -13,3 +13,4 @@ backtrack_logs/
 model_checkpoints/
 dashboard/status.json
 dashboard/history.json
+dashboard/consensus_history.json
