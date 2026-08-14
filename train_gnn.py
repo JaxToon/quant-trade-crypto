@@ -50,9 +50,26 @@ STOCK_TICKERS = {sym: [sym] for sym in settings.STOCK_WATCHLIST}
 
 SYMBOL_TICKERS = STOCK_TICKERS if settings.ASSET_TYPE == "stock" else CRYPTO_TICKERS
 
-YF_MAX_DAYS_5M = 60      # Yahoo Finance's hard limit for 5-minute-interval history
-STRIDE_CANDLES = 30      # spacing between training snapshots (~2.5h at 5m)
-LABEL_HORIZON = 24       # candles forward for the return label (~2h at 5m)
+# Stocks only trade ~6.5h/day — the same 60-day/5m window that gives crypto
+# plenty of candles (24/7) gave stocks just 4680 candles/symbol, and after
+# MIN_LOOKBACK/STRIDE only 152 training samples total. That undertraining
+# was confirmed directly: a trained stock model returned near-identical
+# output (~-0.0017) across wildly different random inputs — collapsed to
+# predicting a constant instead of learning anything. Fetching 1h/730d gives
+# a similar raw candle count (~5073) but 2 years of real regime diversity
+# instead of 2 months, and a smaller relative stride multiplies the
+# candidate sample pool before the random MAX_SAMPLES_PER_SYMBOL subsample.
+if settings.ASSET_TYPE == "stock":
+    FETCH_INTERVAL = "1h"
+    FETCH_DAYS = 730
+    STRIDE_CANDLES = 4       # ~4h between samples
+    LABEL_HORIZON = 4        # ~4h forward return label
+else:
+    FETCH_INTERVAL = "5m"
+    FETCH_DAYS = 60          # Yahoo's hard limit for 5-minute-interval history
+    STRIDE_CANDLES = 30      # ~2.5h between samples
+    LABEL_HORIZON = 24       # ~2h forward return label
+
 MIN_LOOKBACK = 100       # candles needed before SMC market-structure is meaningful
 MAX_SAMPLES_PER_SYMBOL = 200
 
@@ -127,7 +144,7 @@ def _encode_market_structure(ms: str) -> float:
 def fetch_candles(symbol: str, tickers: list[str]) -> list[Candle]:
     for ticker in tickers:
         try:
-            df = yf.download(ticker, period=f"{YF_MAX_DAYS_5M}d", interval="5m", progress=False, auto_adjust=True)
+            df = yf.download(ticker, period=f"{FETCH_DAYS}d", interval=FETCH_INTERVAL, progress=False, auto_adjust=True)
             if df.empty or len(df) < MIN_LOOKBACK + LABEL_HORIZON + STRIDE_CANDLES:
                 continue
 
@@ -143,7 +160,7 @@ def fetch_candles(symbol: str, tickers: list[str]) -> list[Candle]:
                        close=closes[i], volume=volumes[i])
                 for i in range(len(closes))
             ]
-            print(f"  {symbol} ({ticker}): {len(candles)} x 5m candles")
+            print(f"  {symbol} ({ticker}): {len(candles)} x {FETCH_INTERVAL} candles")
             return candles
         except Exception as e:
             print(f"  {symbol} ({ticker}): failed — {e}")
@@ -205,7 +222,7 @@ def build_symbol_series(symbol: str, tickers: list[str]) -> list[tuple[list[floa
 
 def main():
     print(f"ASSET_TYPE={settings.ASSET_TYPE} — training on {list(SYMBOL_TICKERS.keys())}")
-    print(f"Building historical training snapshots ({YF_MAX_DAYS_5M}d of 5m candles, real SMC replay)...\n")
+    print(f"Building historical training snapshots ({FETCH_DAYS}d of {FETCH_INTERVAL} candles, real SMC replay)...\n")
     per_symbol: dict[str, list[tuple[list[float], float]]] = {}
     for symbol, tickers in SYMBOL_TICKERS.items():
         series = build_symbol_series(symbol, tickers)

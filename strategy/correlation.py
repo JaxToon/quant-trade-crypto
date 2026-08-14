@@ -13,16 +13,15 @@ computing this live from a rolling price buffer. Re-run the generation
 snippet in DEPLOYMENT.md-adjacent notes if this goes stale (or ask to
 regenerate — it's a ~10-line script).
 
-Stock correlations (STOCK_CORRELATION_MATRIX) computed the same way, 30d
-hourly returns via yfinance. Much noisier than the crypto matrix — hourly
-stock data only exists during ~6.5h/day trading sessions (209 observations
-over 30 days vs crypto's ~720 for the same window), and large-cap tech
-correlations came out weaker and less consistent than expected (e.g.
-AAPL-AMZN at -0.523, where same-sector large caps are usually positively
-correlated) — plausibly idiosyncratic, earnings-driven moves during this
-specific window rather than a stable structural relationship. Treat the
-stock matrix as lower-confidence than the crypto one; a longer window
-would help but wasn't re-run before this snapshot was taken.
+Stock correlations (STOCK_CORRELATION_MATRIX) computed from 730 days of
+hourly returns (~5072 observations/symbol) — extended from an original 30d
+snapshot (~209 observations/symbol) that was noisy enough to show
+implausible results (e.g. AAPL-AMZN at -0.523, negative correlation between
+two large-cap tech names that should co-move with the market). The 730d
+recompute lands everywhere in a sane 0.26-0.58 positive range, consistent
+with expected large-cap tech beta correlation — confirms the original
+snapshot was sample-size noise, not a real relationship. Still a static
+snapshot like the crypto matrix; re-run if it goes stale.
 """
 from __future__ import annotations
 
@@ -59,37 +58,36 @@ CRYPTO_CORRELATION_MATRIX: dict[tuple[str, str], float] = {
     ("DOTUSDT", "XRPUSDT"): 0.583,
 }
 
-# (symbol_a, symbol_b) -> Pearson correlation of hourly returns, 30d window.
-# See module docstring — noisier / lower-confidence than the crypto matrix.
+# (symbol_a, symbol_b) -> Pearson correlation of hourly returns, 730d window.
 STOCK_CORRELATION_MATRIX: dict[tuple[str, str], float] = {
-    ("AAPL", "MSFT"): -0.048,
-    ("AAPL", "GOOGL"): -0.111,
-    ("AAPL", "AMZN"): -0.523,
-    ("AAPL", "NVDA"): -0.138,
-    ("AAPL", "META"): -0.020,
-    ("AAPL", "TSLA"): 0.006,
-    ("AAPL", "AVGO"): 0.004,
-    ("MSFT", "GOOGL"): 0.194,
-    ("MSFT", "AMZN"): 0.434,
-    ("MSFT", "NVDA"): 0.199,
-    ("MSFT", "META"): -0.194,
-    ("MSFT", "TSLA"): 0.264,
-    ("MSFT", "AVGO"): 0.178,
-    ("GOOGL", "AMZN"): 0.545,
-    ("GOOGL", "NVDA"): 0.166,
-    ("GOOGL", "META"): 0.413,
-    ("GOOGL", "TSLA"): 0.382,
-    ("GOOGL", "AVGO"): 0.008,
-    ("AMZN", "NVDA"): 0.222,
-    ("AMZN", "META"): 0.175,
-    ("AMZN", "TSLA"): 0.239,
-    ("AMZN", "AVGO"): -0.028,
-    ("NVDA", "META"): 0.049,
-    ("NVDA", "TSLA"): 0.365,
-    ("NVDA", "AVGO"): 0.579,
-    ("META", "TSLA"): 0.252,
-    ("META", "AVGO"): -0.181,
-    ("TSLA", "AVGO"): 0.322,
+    ("AAPL", "MSFT"): 0.298,
+    ("AAPL", "GOOGL"): 0.341,
+    ("AAPL", "AMZN"): 0.315,
+    ("AAPL", "NVDA"): 0.297,
+    ("AAPL", "META"): 0.277,
+    ("AAPL", "TSLA"): 0.339,
+    ("AAPL", "AVGO"): 0.265,
+    ("MSFT", "GOOGL"): 0.350,
+    ("MSFT", "AMZN"): 0.507,
+    ("MSFT", "NVDA"): 0.424,
+    ("MSFT", "META"): 0.410,
+    ("MSFT", "TSLA"): 0.283,
+    ("MSFT", "AVGO"): 0.327,
+    ("GOOGL", "AMZN"): 0.496,
+    ("GOOGL", "NVDA"): 0.345,
+    ("GOOGL", "META"): 0.373,
+    ("GOOGL", "TSLA"): 0.331,
+    ("GOOGL", "AVGO"): 0.312,
+    ("AMZN", "NVDA"): 0.447,
+    ("AMZN", "META"): 0.542,
+    ("AMZN", "TSLA"): 0.366,
+    ("AMZN", "AVGO"): 0.361,
+    ("NVDA", "META"): 0.414,
+    ("NVDA", "TSLA"): 0.361,
+    ("NVDA", "AVGO"): 0.582,
+    ("META", "TSLA"): 0.302,
+    ("META", "AVGO"): 0.329,
+    ("TSLA", "AVGO"): 0.352,
 }
 
 
