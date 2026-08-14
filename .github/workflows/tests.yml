@@ -1,12 +1,16 @@
 name: Tests
 
-# Runs the tests/ suite on every push and PR. Deliberately installs only
-# python-dotenv + pytest, not the full requirements.txt (torch, torch-
-# geometric, transformers, spacy) — the covered modules (strategy/
-# entry_insight.py, backtrack/paper_trading.py, strategy/correlation.py)
-# don't import any of that, and keeping CI fast matters more here than
+# Runs the tests/ suite on every push and PR. Installs only what the tested
+# modules actually import, not the full requirements.txt (torch, torch-
+# geometric, transformers, spacy) — keeping CI fast matters more here than
 # exercising the full dependency stack, which none of these tests touch
-# anyway (no Neo4j, no GPU, no live API keys required).
+# (no Neo4j, no GPU, no live API keys or network calls required — every
+# test that would otherwise hit a real network call mocks it instead).
+#
+# hmmlearn/numpy/requests are for test_hmm_regime.py specifically (it
+# imports risk/hmm_regime.py directly to test the real fitting/inference
+# logic against synthetic data — pulls in scipy/scikit-learn transitively
+# via hmmlearn, still far lighter than the torch/transformers stack).
 on:
   push:
   pull_request:
@@ -19,7 +23,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install minimal test dependencies
-        run: pip install pytest python-dotenv
+      - name: Install test dependencies
+        run: pip install pytest python-dotenv hmmlearn numpy requests
       - name: Run tests
         run: python -m pytest tests/ -v
