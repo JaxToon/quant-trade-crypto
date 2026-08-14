@@ -91,12 +91,12 @@ class RegimeDetector:
 
     # ── Training ───────────────────────────────────────────────────────────
 
-    def fit(self, client, days: int = 60) -> None:
-        """
-        Fit HMM on `days` of hourly BTC data.
-        Called once at startup and weekly via scheduler.
-        """
-        logger.info("Fitting HMM on %d days of BTC data...", days)
+    def _fetch_btc_closes(self, days: int) -> list[float]:
+        """Hourly BTC closes for `fit()`. Binance REST first, yfinance fallback
+        (mirrors _fetch_btc_volatility() — fit() previously had NO fallback at
+        all, so any transient Binance hiccup silently left fit() as a no-op,
+        quietly keeping whatever model — possibly a broken one — was already
+        on disk)."""
         try:
             resp = requests.get(
                 "https://api.binance.com/api/v3/klines",
@@ -104,12 +104,53 @@ class RegimeDetector:
                 timeout=15,
             )
             resp.raise_for_status()
-            klines = resp.json()
-            closes = [float(k[4]) for k in klines]
+            return [float(k[4]) for k in resp.json()]
+        except Exception as exc:
+            logger.warning("HMM fit: Binance klines fetch failed (%s), trying yfinance fallback", exc)
+
+        import yfinance as yf
+        df = yf.download("BTC-USD", period=f"{min(days, 730)}d", interval="1h", progress=False, auto_adjust=True)
+        return df["Close"].dropna().values.flatten().tolist()
+
+    def fit(self, client, days: int = 60) -> None:
+        """
+        Fit HMM on `days` of hourly BTC data.
+        Called once at startup and weekly via scheduler.
+        """
+        logger.info("Fitting HMM on %d days of BTC data...", days)
+        try:
+            closes = self._fetch_btc_closes(days)
             log_returns = np.array([np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))])
+
+            # Sanity check BEFORE fitting: a bad/garbled API response (e.g. an
+            # error body that still happened to parse) previously produced a
+            # model with mean_abs_change=1.01 for the "turbulent" state —
+            # implying >100% single-hour moves on average, which BTC has never
+            # done. A single hourly log-return magnitude above 1.0 (+-171%/-63%)
+            # is not a real market event; treat it as corrupted input and bail
+            # rather than silently persisting a broken model.
+            if len(log_returns) < 48 or not np.all(np.isfinite(log_returns)) or np.max(np.abs(log_returns)) > 1.0:
+                logger.error(
+                    "HMM fitting aborted: BTC kline data looks corrupted "
+                    "(n=%d, max|log_return|=%.4f) — keeping previous model.",
+                    len(log_returns), float(np.max(np.abs(log_returns))) if len(log_returns) else float("nan"),
+                )
+                return
+
             vol = np.array([np.std(log_returns[max(0, i - 23):i + 1]) for i in range(len(log_returns))])
-            abs_change = np.abs(log_returns)
-            # Feature matrix: [volatility, |return|]
+            # 24h cumulative % change over the SAME rolling window `vol` uses —
+            # matches _fetch_btc_volatility()'s live feature exactly (that
+            # computes abs total move over a 24h window, not a single candle).
+            # This used to be np.abs(log_returns) — a single hour's move — so
+            # the model was trained on one statistic and fed a completely
+            # different one (24h cumulative move, routinely 10-50x larger) at
+            # live inference time, guaranteeing live observations looked like
+            # extreme outliers even on calm days.
+            abs_change = np.array([
+                abs((closes[i + 1] - closes[max(0, i + 1 - 24)]) / closes[max(0, i + 1 - 24)])
+                for i in range(len(log_returns))
+            ])
+            # Feature matrix: [rolling 24h volatility, rolling 24h abs % change]
             X = np.column_stack([vol, abs_change])
 
             self._model = hmm.GaussianHMM(
