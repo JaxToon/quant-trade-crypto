@@ -18,12 +18,16 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from config import settings
 from graph.neo4j_client import Neo4jClient
 
 app = FastAPI(title="TraderStuff Dashboard")
 
 DASHBOARD_DIR = Path(__file__).parent
-STATUS_FILE = DASHBOARD_DIR / "status.json"
+# Asset-type-suffixed to match main.py's write path — lets a crypto process
+# and a stock process run side by side (different DASHBOARD_PORT each)
+# without one silently overwriting the other's status file.
+STATUS_FILE = DASHBOARD_DIR / f"status_{settings.ASSET_TYPE}.json"
 LOG_FILE = Path(__file__).parent.parent / "trader.log"
 
 
