@@ -508,7 +508,31 @@ class SmartMoneyAnalyzer:
             "in_bearish_ob": nearest_bearish_ob is not None,
             "in_bullish_fvg": nearest_bullish_fvg is not None,
             "in_bearish_fvg": nearest_bearish_fvg is not None,
+            "atr": self._compute_atr(),
         }
+
+    def _compute_atr(self, period: int = 14) -> float:
+        """
+        Average True Range over the last `period` candles, reusing the
+        candle history already maintained for OB/FVG/market-structure
+        detection — no separate data feed needed. True Range per candle is
+        max(high-low, |high-prev_close|, |low-prev_close|), which (unlike
+        Candle.total_range) also captures gap moves between candles, not
+        just each candle's own high-low spread.
+
+        Returns 0.0 with fewer than 2 candles (nothing to compute a range
+        from yet) — callers should treat 0.0 as "ATR not yet available",
+        same convention as the other signals in _empty_signals().
+        """
+        candles = list(self.candles)
+        if len(candles) < 2:
+            return 0.0
+        window = candles[-(period + 1):]
+        true_ranges = []
+        for i in range(1, len(window)):
+            high, low, prev_close = window[i].high, window[i].low, window[i - 1].close
+            true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        return round(sum(true_ranges) / len(true_ranges), 8) if true_ranges else 0.0
 
     def _empty_signals(self) -> dict:
         """Return empty signals when not enough data."""
@@ -522,4 +546,5 @@ class SmartMoneyAnalyzer:
             "in_bearish_ob": False,
             "in_bullish_fvg": False,
             "in_bearish_fvg": False,
+            "atr": self._compute_atr(),
         }

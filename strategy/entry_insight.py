@@ -42,6 +42,7 @@ def build_entry_insight(symbol: str, price: float, smc: dict | None, gnn_signal:
     entry_zone = smc.get("entry_zone")
     stop_loss = smc.get("stop_loss")
     target = smc.get("target")
+    atr = smc.get("atr", 0.0)
     context = smc.get("fvg_context") or _structure_context(smc)
 
     confluence, confidence = _apply_gnn_confluence(direction, confidence, gnn_signal)
@@ -67,8 +68,8 @@ def build_entry_insight(symbol: str, price: float, smc: dict | None, gnn_signal:
             base["spot"]["note"] = base["derivative"]["note"] = veto_note
         return base
 
-    base["spot"] = _spot_recommendation(direction, entry_zone, stop_loss, target, confidence)
-    base["derivative"] = _derivative_recommendation(direction, entry_zone, stop_loss, target, price, confidence)
+    base["spot"] = _spot_recommendation(direction, entry_zone, stop_loss, target, confidence, atr)
+    base["derivative"] = _derivative_recommendation(direction, entry_zone, stop_loss, target, price, confidence, atr)
     return base
 
 
@@ -97,7 +98,7 @@ def _structure_context(smc: dict) -> str:
     return f"Market structure: {smc.get('market_structure', 'unknown')}"
 
 
-def _spot_recommendation(direction: str, entry_zone, stop_loss, target, confidence: float) -> dict:
+def _spot_recommendation(direction: str, entry_zone, stop_loss, target, confidence: float, atr: float = 0.0) -> dict:
     if direction == "long":
         return {
             "actionable": True,
@@ -106,6 +107,7 @@ def _spot_recommendation(direction: str, entry_zone, stop_loss, target, confiden
             "stop_loss": stop_loss,
             "target": target,
             "confidence": confidence,
+            "atr": atr,
             "note": "Bullish setup — bisa entry beli langsung di spot.",
         }
     # Spot can't short — bearish signal is informational only.
@@ -116,11 +118,12 @@ def _spot_recommendation(direction: str, entry_zone, stop_loss, target, confiden
         "stop_loss": stop_loss,
         "target": target,
         "confidence": confidence,
+        "atr": atr,
         "note": "Sinyal bearish — spot tidak bisa short. Pertimbangkan hindari entry atau tunggu.",
     }
 
 
-def _derivative_recommendation(direction: str, entry_zone, stop_loss, target, price: float, confidence: float) -> dict:
+def _derivative_recommendation(direction: str, entry_zone, stop_loss, target, price: float, confidence: float, atr: float = 0.0) -> dict:
     leverage = settings.INSIGHT_DERIVATIVE_LEVERAGE
     entry_ref = price
     if entry_zone:
@@ -140,6 +143,7 @@ def _derivative_recommendation(direction: str, entry_zone, stop_loss, target, pr
         "stop_loss": stop_loss,
         "target": target,
         "confidence": confidence,
+        "atr": atr,
         "suggested_leverage": leverage,
         "est_liquidation": liquidation,
         "note": f"Estimasi kasar @{leverage}x isolated, tidak menghitung funding rate/maintenance margin.",
