@@ -1,25 +1,41 @@
-# Quant-Trade for blue chip stock and crypto
+# TraderStuff — Quant Trading System for Crypto & Blue-Chip Stocks
 
-Advanced quantitative trading system with **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, and **Blue Chip stock/crypto filtering**.
+Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **Graph Neural Network (GNN)**, and **multi-agent LLM debate** into a single research/paper-trading system for crypto (default) or NASDAQ blue chips.
+
+## TL;DR
+
+- **Run it:** `python main.py` — one command starts everything (data streams, GNN, SMC/FVG analysis, dashboard at `http://localhost:8080`). Requires Neo4j running first.
+- **No real money at risk right now.** There are two separate decision paths, both simulated:
+  1. **SMC/FVG entry-insight + $10k virtual paper-trading ledger** — read-only dashboard recommendations, scored against live price with a fixed-risk simulated account. This is the path with real backtested evidence behind it.
+  2. **Multi-agent LLM consensus (Bull/Bear/Critic) + Binance testnet orders** — a separate, independent path (`strategy/agents.py` → `consensus.py` → `execution.py`). Places real orders, but only on Binance's testnet (fake funds).
+- **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap.
+- **What's not yet proven:**
+  - **GNN's contribution is measured as negligible** in a properly controlled ablation (SMC-only vs SMC+GNN: identical win rate, identical trade count, on real data).
+  - **The stock/NASDAQ path has full infrastructure but has never actually been run** — flip `ASSET_TYPE=stock`, train the GNN for it, and it's untested territory.
+  - **The LLM-consensus/testnet path's decision quality is unaudited** — it has literally never closed a trade (a since-fixed regime-detection bug blocked it entirely until 2026-08-14), and its execute threshold appears very hard to reach given the formula's own math (see `TRADE_THRESHOLD` in Configuration below).
+  - **Live paper-trading sample size is still small** — treat the backtested numbers as evidence, not proof; the live ledger needs weeks more real time to accumulate before its own win rate means much.
+- **Where to look next:** `DEPLOYMENT.md` for persistence/cloud-deployment notes, `python backtest.py --help`-style flags below for validation tooling, `dashboard/consensus_history.json` (via `/api/status`) for the LLM-consensus path's live decision history.
+
+---
 
 ## 🚀 Features
 
 ### Core Trading System
-- **Graph Neural Network (GNN)** for price prediction using knowledge graph embeddings
-- **Multi-Agent LLM Consensus** (Bull, Bear, Critic agents) for trade decisions
-- **HMM Regime Detection** with circuit breakers for turbulent markets
-- **Neo4j Knowledge Graph** for fundamental relationships and news integration
-- **Continual Learning** with backtrack analysis from past losses
+- **Graph Neural Network (GNN)** — Heterogeneous Graph Transformer (`gnn/model.py: HGTSignalModel`) for price-signal prediction over the knowledge graph
+- **Multi-Agent LLM Consensus** (Bull, Bear, Critic agents) for the separate testnet-execution path
+- **HMM Regime Detection** with a circuit breaker (bear veto + risk cut in turbulent regimes) — feeds the LLM-consensus path only
+- **Neo4j Knowledge Graph** for token/protocol relationships and news-derived edges
+- **Continual Learning** — two independent loops: contrastive fine-tuning from realized paper-trade outcomes (`backtrack/continual_learning.py`), and nightly post-mortem causal discovery from real testnet losses (`backtrack/post_mortem.py`, dormant until the LLM-consensus path actually closes a trade)
 
-### 🆕 Smart Money Concepts (SMC)
+### Smart Money Concepts (SMC)
 Institutional order flow analysis with:
 - **Order Blocks (OB)**: Last opposing candle before strong moves (bullish/bearish)
 - **Break of Structure (BOS)**: Market structure shifts (higher highs, lower lows)
 - **Change of Character (ChoCH)**: Trend reversals
 - **Liquidity Zones**: Stop hunt areas (swing highs/lows)
-- **Market Structure Analysis**: Real-time trend detection
+- **Market Structure Analysis**: Real-time trend detection, run independently across 5m/15m/1h layers simultaneously per symbol
 
-### 🆕 Fair Value Gap (FVG) Analysis
+### Fair Value Gap (FVG) Analysis
 Imbalance/inefficiency detection:
 - **Bullish FVG**: Gap-up patterns (support zones)
 - **Bearish FVG**: Gap-down patterns (resistance zones)
@@ -27,17 +43,22 @@ Imbalance/inefficiency detection:
 - **FVG Clusters**: Confluence zones with multiple FVGs
 - **Trading Signals**: Entry, stop-loss, and target calculations
 
-### 🆕 Blue Chip Filter
+### $10k Virtual Paper-Trading Ledger
+- Fixed-fractional risk sizing (2%–5% of starting balance per trade, scaled by signal confidence), sized off *starting* balance to avoid compounding drift
+- Fee-aware stop-distance filtering — rejects setups too tight to survive round-trip fees
+- **Portfolio-level correlated-risk cap** — caps aggregate correlation-weighted exposure across open positions at 8% of starting balance, so several correlated bets can't silently stack into one oversized bet
+- Persists across restarts (`backtrack_logs/paper_ledger_{crypto,stock}.json`)
+
+### Blue Chip Filter
 High-quality asset selection:
 - **Crypto Blue Chips**: BTC, ETH, BNB, SOL, ADA, AVAX, DOT, XRP
 - **NASDAQ Blue Chips**: AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA, AVGO
 - **Quality Scoring**: Market cap, volume, volatility, age metrics
-- **Auto-filtering**: Configurable thresholds for institutional-grade assets
 
 ### Data Sources
-- **Binance**: Real-time crypto WebSocket (default)
-- **TradingView**: Multi-market support (crypto, stocks, forex)
-- **Multi-timeframe**: 1m, 5m, 15m, 1h, 4h, 1d
+- **Binance**: Real-time crypto WebSocket (default), klines on 5m/15m/1h simultaneously
+- **TradingView**: Multi-market support (crypto, stocks, forex) — needed for the stock path since Binance doesn't list equities
+- **yfinance**: Historical backtesting data source (`backtest.py`, `train_gnn.py`) — up to 60 days at 5m/15m, 730 days at 1h
 
 ---
 
@@ -45,9 +66,9 @@ High-quality asset selection:
 
 ### Requirements
 - Python 3.10+
-- Neo4j 5.0+
-- Binance API keys (for crypto trading)
-- OpenAI API key (for LLM agents)
+- Neo4j 5.0+ (Neo4j Desktop or Docker)
+- Binance API keys (testnet is fine — see below)
+- OpenAI API key (for the LLM-consensus path)
 
 ### Setup
 
@@ -60,9 +81,8 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2. **Configure Neo4j:**
+2. **Start Neo4j** (Neo4j Desktop — start the DBMS from the app; or Docker):
 ```bash
-# Start Neo4j (Docker)
 docker run -d \
   --name neo4j \
   -p 7474:7474 -p 7687:7687 \
@@ -91,11 +111,12 @@ BINANCE_TESTNET=true
 # OpenAI (for LLM multi-agent consensus)
 OPENAI_API_KEY=your_openai_key
 
-# Asset Selection
+# Asset Selection — a global switch, not two paths running at once.
+# Only one of crypto/stock is active per run; see "Switch to Stock Trading" below.
 ASSET_TYPE=crypto  # "crypto" or "stock"
 MARKET_SOURCE=binance  # "binance" or "tradingview"
 
-# TradingView (if using TradingView as source)
+# TradingView (only used when ASSET_TYPE=stock — Binance doesn't list equities)
 TRADINGVIEW_EXCHANGE=BINANCE  # BINANCE, NASDAQ, NYSE
 TRADINGVIEW_SCREENER=crypto   # crypto, america
 TRADINGVIEW_INTERVAL=1m        # 1m, 5m, 15m, 1h, 4h, 1d
@@ -120,73 +141,76 @@ python -m spacy download en_core_web_sm
 python main.py
 ```
 
-`main.py` now starts the trading orchestrator **and** the monitoring dashboard together — no separate terminal needed. The system will:
+`main.py` starts the trading orchestrator **and** the monitoring dashboard together — no separate terminal needed. The system will:
 1. Initialize Neo4j schema
 2. Serve the dashboard at `http://localhost:8080`
-3. Fit HMM regime model (60 days of data)
-4. Load/build GNN model
-5. Start real-time data streams (Binance or TradingView)
-6. Run SMC/FVG analysis on every tick
-7. Execute trades based on multi-agent consensus + SMC signals
+3. Fit the HMM regime model (60 days of data) — refits weekly
+4. Load/build the GNN model (per-asset-type checkpoint: `model_checkpoints/hgt_latest_{crypto,stock}.pt`)
+5. Start real-time data streams (Binance or TradingView) across all configured timeframes
+6. Run SMC/FVG analysis on every tick, feed the paper-trading ledger
+7. Run the LLM-consensus debate + testnet execution path every 60s (skipped while bear veto is active)
 
-Set `DASHBOARD_ENABLED=false` in `.env` to skip the embedded dashboard, or run it standalone in its own terminal with `python run_dashboard.py` (still supported).
+Set `DASHBOARD_ENABLED=false` in `.env` to skip the embedded dashboard, or run it standalone in its own terminal with `python run_dashboard.py`.
 
 Dashboard shows:
-- Real-time P(Trade) scores
-- GNN signals
-- SMC market structure
-- Active Order Blocks and FVGs
-- Current regime (low-vol, normal, turbulent)
-- Recent trades
-- **Entry Point Insight** — read-only spot vs. derivative recommendations (direction, entry zone, SL/TP, and a rough liquidation estimate for derivatives) computed from the live SMC/FVG signals. This is informational only — the system never auto-trades derivatives; only spot orders are ever placed (see `strategy/execution.py`).
+- **Entry Point Insight** — read-only spot vs. derivative recommendations (direction, entry zone, SL/TP, and a rough liquidation estimate) computed from live SMC/FVG signals, per symbol per timeframe layer
+- **Paper-trading stats** — balance, win rate, breakdown by market (spot/derivative) and by timeframe layer, plus any rejection reasons (fee-too-tight, correlation cap hit) so a filtered signal is never silently invisible
+- Equity curve and price-movement charts (persisted across restarts)
+- Real-time GNN signals, current regime (low-vol/normal/turbulent), bear-veto state
+- **LLM-consensus decision history** (`consensus_decisions` in `/api/status`) — every P(Trade) evaluation from the debate path, executed or not, so its threshold can eventually be calibrated with real evidence instead of guesswork
+
+### Historical backtesting
+
+```bash
+python backtest.py                                    # default: in-sample/out-of-sample split, primary timeframe
+python backtest.py --timeframe 1h --days 730 --segments 6   # multi-regime: does the edge hold across 2 years, not one window?
+python backtest.py --with-gnn                          # controlled ablation: does GNN confluence add real value over SMC alone?
+python backtest.py --multi-timeframe                   # replays 5m+15m+1h concurrently per symbol — matches main.py's real live condition
+python backtest.py --slippage-sweep                     # finds the slippage level at which the backtested edge turns net-negative
+```
+
+All modes replay real historical candles (yfinance) through the same `entry_insight` pipeline the dashboard uses live, in true chronological lockstep across symbols — not one-symbol-fully-then-the-next, which would hide the portfolio correlation cap's real cross-symbol behavior. Results save to `backtrack_logs/backtest_ledger_*.json`, separate from the live paper ledger.
 
 ---
 
 ## 🧠 System Architecture
 
-### Trading Decision Flow
+There are **two independent decision paths** — don't conflate their results:
+
+### Path 1: SMC/FVG entry-insight → paper-trading ledger (dashboard, read-only + simulated)
 
 ```
-Market Data (Binance/TradingView)
+Market Data (Binance, multi-timeframe)
          ↓
-SMC Analyzer (Order Blocks, FVG, Market Structure)
+SMC Analyzer + FVG Analyzer (per timeframe layer)
          ↓
-Technical Indicators (RSI, MACD, BB)
+GNN confluence check (boost if agrees, penalize/veto if disagrees)
          ↓
-GNN Inference (knowledge graph embedding)
+entry_insight (spot + derivative recommendation, confidence score)
          ↓
-Multi-Agent Debate (Bull, Bear, Critic)
-         ↓
-P(Trade) = W1*S_Bull - W2*S_Bear - C_Risk + SMC_Boost
-         ↓
-Execute if P(Trade) > threshold
+Paper ledger: fee-viability filter → conviction-scaled sizing → portfolio correlation cap → open/reject
 ```
 
-### Smart Money Integration
+### Path 2: LLM-consensus → Binance testnet execution
 
-SMC signals influence trading decisions through:
+```
+Market Data (primary timeframe only)
+         ↓
+Technical Indicators (RSI, MACD, BB) + GNN signal
+         ↓
+Multi-Agent Debate (Bull, Bear, Critic) — skipped entirely while bear veto is active
+         ↓
+P(Trade) = W1_BULL * S_Bull - W2_BEAR * S_Bear - C_Risk  (max possible: W1_BULL = 0.6)
+         ↓
+Execute if P(Trade) >= TRADE_THRESHOLD (0.55) — real testnet order via strategy/execution.py
+```
 
-1. **Confluence Boost** (+15%): When SMC signal agrees with GNN
-   - Bullish GNN + Bullish Order Block/FVG = Higher conviction
-   
-2. **Divergence Penalty** (-20%): When SMC contradicts GNN
-   - Bullish GNN + Bearish Order Block = Lower conviction
+These paths share the GNN and Neo4j graph, but have separate ledgers, separate risk logic, and — as of this writing — very different track records: Path 1 has real backtested + live evidence behind it; Path 2 has never closed a single trade (see TL;DR).
 
-3. **Zone Boost** (+10%): Price inside high-quality institutional zones
-   - Entry at bullish OB/FVG for longs
-   - Entry at bearish OB/FVG for shorts
+### Smart Money Integration (both paths)
 
-### LLM Agent Prompts (Enhanced)
-
-**Bull Agent** now understands:
-- "Price in bullish Order Block = institutional demand"
-- "Bullish FVG acting as support"
-- "Market structure: higher highs/higher lows"
-
-**Bear Agent** now identifies:
-- "Bearish Order Block = institutional supply"
-- "Liquidity sweeps before reversals"
-- "Market structure breakdown"
+1. **Confluence Boost**: When SMC/FVG signal agrees with the GNN signal, confidence is boosted
+2. **Divergence Penalty / Veto**: When SMC contradicts GNN, confidence is penalized — and vetoed entirely below `ENTRY_INSIGHT_MIN_CONFIDENCE` (Path 1) or when the Bear agent also scores high during a bear-veto regime (Path 2)
 
 ---
 
@@ -196,7 +220,7 @@ SMC signals influence trading decisions through:
 
 #### Asset Selection
 ```python
-ASSET_TYPE = "crypto"  # or "stock"
+ASSET_TYPE = "crypto"  # or "stock" — global switch, see .env
 CRYPTO_WATCHLIST = ["BTCUSDT", "ETHUSDT", ...]
 STOCK_WATCHLIST = ["AAPL", "MSFT", "GOOGL", ...]
 ```
@@ -205,6 +229,7 @@ STOCK_WATCHLIST = ["AAPL", "MSFT", "GOOGL", ...]
 ```python
 SMC_ENABLED = True
 SMC_LOOKBACK_CANDLES = 100
+BINANCE_SMC_TIMEFRAMES = ["5m", "15m", "1h"]  # all run concurrently per symbol
 
 # Order Block settings
 OB_MIN_STRENGTH = 30.0  # 0-100
@@ -214,27 +239,33 @@ OB_MAX_AGE_HOURS = 168  # 1 week
 FVG_MIN_GAP_PERCENT = 0.1  # Filter noise
 FVG_MITIGATION_THRESHOLD = 50.0  # % filled
 FVG_MAX_AGE_HOURS = 168
-
-# SMC signal weights
-SMC_CONFLUENCE_BOOST = 0.15
-SMC_DIVERGENCE_PENALTY = 0.20
 ```
 
-#### Blue Chip Filter
+#### Paper Trading (Path 1)
 ```python
-BLUE_CHIP_ENABLED = True
-BLUE_CHIP_MIN_MARKET_CAP = 10_000_000_000  # $10B
-BLUE_CHIP_MIN_VOLUME_24H = 1_000_000_000   # $1B
-BLUE_CHIP_MAX_VOLATILITY = 15.0  # 15%
+PAPER_TRADING_STARTING_BALANCE = 10000
+PAPER_TRADING_RISK_PCT = 0.02                    # base risk unit: 2% of starting balance
+PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER = 2.5    # up to 5% at max confidence
+PORTFOLIO_CORRELATION_THRESHOLD = 0.5
+PORTFOLIO_MAX_CORRELATED_RISK_PCT = 0.08         # aggregate correlated-risk cap
 ```
 
-#### Risk Management
+#### LLM-Consensus Risk Management (Path 2)
 ```python
-TRADE_THRESHOLD = 0.55      # Min P(Trade) to open
+TRADE_THRESHOLD = 0.55      # Min P(Trade) to open — see TL;DR re: reachability
+W1_BULL = 0.6                # formula ceiling is W1_BULL itself (0.6), not 1.0
+W2_BEAR = 0.4
 MAX_POSITION_PCT = 0.02     # Max 2% per trade
 STOP_LOSS_PCT = 0.03        # -3% hard stop
 TAKE_PROFIT_PCT = 0.06      # +6% target
 LEVERAGE = 1                # 1x (spot-equivalent)
+```
+
+#### HMM Regime Detection
+```python
+HMM_N_STATES = 3            # 0=low-vol, 1=normal, 2=high-stress-turbulent
+HMM_TURBULENT_STATE = 2
+HMM_RISK_REDUCTION = 0.70   # slash MAX_POSITION_PCT by 70% in turbulent regime
 ```
 
 ---
@@ -302,6 +333,8 @@ LEVERAGE = 1                # 1x (spot-equivalent)
 
 ### Switch to Stock Trading
 
+**Never actually tested end-to-end** — the infrastructure (seed tokens, separate GNN checkpoint, separate paper ledger) is all in place, but nobody has run it live yet. Steps:
+
 ```bash
 # Edit .env
 ASSET_TYPE=stock
@@ -311,7 +344,10 @@ TRADINGVIEW_SCREENER=america
 TRADINGVIEW_INTERVAL=5m
 ```
 
-Restart `main.py` → now trading NASDAQ blue chips.
+```bash
+python train_gnn.py   # trains a SEPARATE checkpoint for stocks — must run before main.py, there is no pretrained stock model
+python main.py
+```
 
 ### Custom Watchlist
 
@@ -330,21 +366,21 @@ STOCK_WATCHLIST = ["TSLA", "NVDA", "PLTR", "COIN"]
 python train_gnn.py
 ```
 
-Trains on:
-- Historical price data
-- Neo4j graph structure
-- Past trade outcomes (continual learning)
+Trains from scratch each run (fresh weights avoid stale-checkpoint mismatches) on historical candles replayed through the real SMC analyzer — not zeroed placeholder features.
 
 ### Run Post-Mortem Analysis
 
 ```bash
-python -c "from backtrack.post_mortem import run_nightly_postmortem; run_nightly_postmortem()"
+python -c "
+from backtrack.post_mortem import run_nightly_postmortem
+from gnn.trainer import GNNTrainer
+gnn = GNNTrainer()
+gnn.load()
+run_nightly_postmortem(gnn)
+"
 ```
 
-Analyzes:
-- Today's winning/losing trades
-- Clusters failed scenarios
-- Updates critic agent knowledge
+Reads real *closed, losing* trades from Neo4j (Path 2 only — the LLM-consensus/testnet path), clusters recent news, asks an LLM to deduce a missing causal relationship, and adds it to the graph. Runs automatically at 00:00 UTC via `main.py`'s scheduler. Currently a no-op until Path 2 closes its first trade.
 
 ---
 
@@ -352,9 +388,10 @@ Analyzes:
 
 ### Logs
 
-- `trader.log`: Main system log
-- `backtrack_logs/`: Nightly post-mortem analyses
-- `dashboard/status.json`: Real-time system state
+- `trader.log`: Main system log, accumulates across restarts (append mode) — the reliable source for "what happened since the system started," unlike...
+- `backtrack_logs/main_run.log`: gets truncated on every restart if you're launching via a redirect (`python main.py > backtrack_logs/main_run.log`)
+- `backtrack_logs/`: paper-trading ledgers, backtest results, execution position state
+- `dashboard/status.json`, `dashboard/history.json`, `dashboard/consensus_history.json`: real-time and historical dashboard state, persisted across restarts
 
 ### Neo4j Queries
 
@@ -366,7 +403,7 @@ RETURN t.symbol, t.smc_market_structure, t.smc_signal
 ORDER BY t.smc_fvg_confidence DESC
 ```
 
-**View recent trades:**
+**View recent (Path 2 / testnet) trades:**
 ```cypher
 MATCH (t:Trade)
 WHERE t.timestamp > timestamp() - 86400000  // Last 24h
@@ -384,7 +421,7 @@ Run system in testnet mode (default):
 BINANCE_TESTNET=true
 ```
 
-This uses Binance testnet with fake money for safe testing.
+This uses Binance testnet with fake money — Path 2's execution engine only ever places testnet orders under this config. Path 1 (paper-trading ledger) never touches a real exchange at all, testnet or otherwise; it's a purely internal simulation scored against live price feeds.
 
 ---
 
@@ -396,7 +433,7 @@ pip install tradingview-ta
 ```
 
 ### "Neo4j connection failed"
-Check Neo4j is running:
+Neo4j Desktop: open the app and start the DBMS manually — it doesn't auto-start with `main.py`. Docker:
 ```bash
 docker ps | grep neo4j
 # Or restart: docker restart neo4j
@@ -404,7 +441,7 @@ docker ps | grep neo4j
 
 ### "OpenAI rate limit"
 LLM agents are cached for 5 minutes. If hitting limits:
-- Use `gpt-4o-mini` (cheaper, faster)
+- Use `gpt-4o-mini` (cheaper, faster) — already the default for Bull/Bear
 - Increase cache TTL in `strategy/agents.py`
 
 ### SMC not detecting patterns
@@ -412,49 +449,60 @@ LLM agents are cached for 5 minutes. If hitting limits:
 - Lower thresholds: `FVG_MIN_GAP_PERCENT = 0.05`
 - Check logs for detection events
 
+### Dashboard shows a trade but the LLM-consensus path never executes
+This is expected right now — see TL;DR. `TRADE_THRESHOLD=0.55` sits close to the P(Trade) formula's own mathematical ceiling (0.6), and real observed debate scores haven't gotten close. Check `dashboard/consensus_history.json` (or the `consensus_decisions` field in `/api/status`) to see the live P(Trade) distribution.
+
 ---
 
 ## 📚 Project Structure
 
 ```
 TraderStuff/
-├── main.py                    # Main orchestrator
+├── main.py                    # Main orchestrator — runs both decision paths + dashboard
+├── backtest.py                # Historical validation: is/oos, multi-regime, GNN ablation, multi-timeframe concurrency, slippage sweep
+├── train_gnn.py                # GNN training from historical candles (separate checkpoint per ASSET_TYPE)
+├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
 ├── config/
-│   └── settings.py            # Configuration (SMC, Blue Chip, etc.)
+│   └── settings.py            # Configuration (SMC, paper trading, LLM-consensus risk, HMM regime, etc.)
 ├── strategy/
 │   ├── smart_money.py         # SMC analyzer (OB, BOS, ChoCH)
 │   ├── fvg_analyzer.py        # FVG detection & signals
+│   ├── entry_insight.py       # Path 1: dashboard recommendation builder
+│   ├── correlation.py         # Static crypto/stock correlation matrices for the portfolio risk cap
 │   ├── blue_chip_filter.py    # Asset quality filter
-│   ├── agents.py              # LLM multi-agent (SMC-aware)
-│   ├── consensus.py           # P(Trade) computation (SMC-enhanced)
-│   └── execution.py           # Order execution
+│   ├── agents.py              # Path 2: LLM multi-agent debate (SMC-aware)
+│   ├── consensus.py           # Path 2: P(Trade) computation
+│   └── execution.py           # Path 2: Binance testnet order execution (persisted open-position state)
+├── backtrack/
+│   ├── paper_trading.py       # Path 1: $10k virtual ledger, sizing, correlation cap
+│   ├── post_mortem.py         # Path 2: nightly causal-discovery analysis (dormant until Path 2 has real losses)
+│   └── continual_learning.py  # Path 1: GNN fine-tuning from realized paper-trade outcomes
 ├── ingestion/
-│   ├── structured_stream.py   # Binance WebSocket
-│   ├── tradingview_stream.py  # TradingView data
-│   └── integrated_stream.py   # Unified stream + SMC
+│   ├── structured_stream.py   # Binance WebSocket, multi-timeframe klines
+│   ├── tradingview_stream.py  # TradingView data (stock path)
+│   └── integrated_stream.py   # Unified stream + per-timeframe SMC
 ├── gnn/
-│   ├── model.py               # GAT model
-│   ├── trainer.py             # Training loop
-│   └── dataset.py             # Graph dataset
+│   ├── model.py               # HGTSignalModel (Heterogeneous Graph Transformer)
+│   ├── trainer.py             # Training + live/backtest inference
+│   └── dataset.py             # Graph dataset builder from Neo4j
 ├── graph/
-│   ├── neo4j_client.py        # Neo4j operations (SMC data)
-│   └── schema.py              # Graph schema
-├── risk/
-│   ├── hmm_regime.py          # HMM regime detector
-│   └── circuit_breaker.py     # Risk control
-└── backtrack/
-    ├── post_mortem.py         # Nightly analysis
-    └── continual_learning.py  # GNN fine-tuning
+│   ├── neo4j_client.py        # Neo4j operations
+│   └── schema.py              # Graph schema, seed tokens (crypto + stock)
+└── risk/
+    ├── hmm_regime.py          # HMM regime detector (feeds Path 2's circuit breaker only)
+    └── circuit_breaker.py     # Bear veto + risk reduction in turbulent regime
 ```
 
 ---
 
 ## 🤝 Contributing
 
-PRs welcome! Areas for improvement:
-- Additional SMC patterns (Wyckoff, ICT concepts)
+PRs welcome! Known gaps worth tackling, roughly in order of value:
+- Validate the stock/NASDAQ path end-to-end (never run live — see Advanced Usage)
+- Calibrate `TRADE_THRESHOLD`/the P(Trade) formula for Path 2 once it has real outcome data to work from
+- Investigate whether GNN confluence can be made to add real value, or whether SMC/FVG alone is the more honest baseline (see `backtest.py --with-gnn`)
+- Local/self-hosted LLM option for Path 2's debate (feasible via an OpenAI-compatible local server; tradeoff is reasoning quality vs. removing the API dependency)
 - More data sources (Polygon.io, Alpaca)
-- Backtesting engine
 - Multi-exchange arbitrage
 
 ---
