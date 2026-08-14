@@ -105,6 +105,7 @@ def mini_batch_update(
     torch.nn.utils.clip_grad_norm_(trainer.model.parameters(), max_norm=1.0)
     optimizer.step()
 
+    trainer._ready = True
     loss_val = float(total_loss.item())
     logger.info("Backtrack update — L_backtrack=%.4f (L_pred=%.4f)", loss_val, float(pred_loss.item()))
     return loss_val
