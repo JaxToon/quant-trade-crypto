@@ -290,6 +290,17 @@ def _write_status(circuit: "CircuitBreaker", signals: dict) -> None:
             "entry_insights": insights,
             "paper_trade_rejections": paper_trade_rejections,
             "paper_trading": _paper_ledger.stats() if _paper_ledger else None,
+            # Most-recent-first slice of actual closed trades — separate
+            # from paper_trading.stats() above, which is aggregates only
+            # (win rate, counts, PnL sums), never the individual trade list.
+            # The dashboard's "Trade History" card previously rendered from
+            # graph.recent_trades (Neo4j Trade nodes, Path 2's testnet
+            # execution path) — always empty, since that path has never
+            # closed a single trade. This is the ledger that actually has
+            # real closed trades right now.
+            "paper_trading_recent_trades": (
+                list(reversed(_paper_ledger.closed_trades[-20:])) if _paper_ledger else []
+            ),
             "consensus_decisions": {
                 "recent": _consensus_history[-50:],
                 "stats": _consensus_stats(),

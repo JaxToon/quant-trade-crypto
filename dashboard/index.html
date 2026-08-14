@@ -402,7 +402,7 @@
   </div>
 
   <div class="card">
-    <div class="card-label">Trade History</div>
+    <div class="card-label">Trade History (Paper Trading)</div>
     <div id="trade-area">
       <div class="no-data" style="padding-top:30px">
         No trades yet — system accumulating data
@@ -795,7 +795,7 @@ async function poll() {
     renderRegime(data.regime, data.bear_veto);
     renderSignals(data.gnn_signals);
     renderGraph(data.graph);
-    renderTrades(data.graph?.recent_trades);
+    renderTrades(data.paper_trading_recent_trades);
     renderEntryInsights(data.entry_insights, data.paper_trade_rejections);
     renderPaperTrading(data.paper_trading);
     renderLogs(data.recent_logs);
