@@ -178,6 +178,21 @@ PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER = 2.5
 PORTFOLIO_CORRELATION_THRESHOLD = 0.5   # only count exposure from pairs correlated >= this
 PORTFOLIO_MAX_CORRELATED_RISK_PCT = 0.08  # cap correlation-weighted aggregate risk at 8% of starting balance
 
+# ATR-based trailing stop: once a position has moved favorably by
+# PAPER_TRADING_TRAILING_ACTIVATION_R multiples of its own initial risk
+# (entry-to-stop distance), the stop starts trailing behind price at
+# PAPER_TRADING_TRAILING_ATR_MULTIPLE x ATR (computed at entry — see
+# strategy/smart_money.py's SmartMoneyAnalyzer._compute_atr, a standard
+# 14-period Average True Range reusing the same candle history OB/FVG
+# detection already maintains) instead of just waiting for the original
+# fixed target. Never loosens once activated. Defaults OFF — backtest
+# before enabling, same discipline as every other risk-affecting change
+# this project has made; a plausible-sounding trailing-stop rule is not
+# automatically a profitable one.
+PAPER_TRADING_TRAILING_STOP_ENABLED = os.getenv("PAPER_TRADING_TRAILING_STOP_ENABLED", "false").lower() == "true"
+PAPER_TRADING_TRAILING_ACTIVATION_R = 1.0    # activate once profit >= 1x initial risk
+PAPER_TRADING_TRAILING_ATR_MULTIPLE = 2.0    # trail this many ATRs behind the best price seen
+
 # ── Historical backtest (backtest.py) ──────────────────────────────────────
 BACKTEST_DAYS = int(os.getenv("BACKTEST_DAYS", "30"))
 

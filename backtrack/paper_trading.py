@@ -56,6 +56,13 @@ class PaperPosition:
     timeframe: str = "5m"  # which SMC/FVG layer this signal came from
     liquidation_price: float | None = None  # derivative only — None for spot
     opened_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    # ATR (14-period, from SmartMoneyAnalyzer) at entry — sizes the trailing
+    # stop's distance if PAPER_TRADING_TRAILING_STOP_ENABLED. 0.0 default so
+    # positions opened/persisted before this field existed simply never
+    # activate trailing (see _maybe_update_trailing_stop's guard) rather
+    # than crashing or getting a fabricated ATR on load.
+    atr_at_entry: float = 0.0
+    trailing_stop: float | None = None
 
 
 class PaperTradingLedger:
@@ -260,6 +267,7 @@ class PaperTradingLedger:
             confidence=rec.get("confidence", 0.0),
             timeframe=timeframe,
             liquidation_price=liquidation_price,
+            atr_at_entry=float(rec.get("atr", 0.0) or 0.0),
             **({"opened_at": opened_at} if opened_at else {}),
         )
         self.open_positions[key] = pos
@@ -270,6 +278,50 @@ class PaperTradingLedger:
             conviction_multiplier, confidence, liq_note,
         )
         return None
+
+    def _maybe_update_trailing_stop(self, pos: PaperPosition, favorable_price: float) -> None:
+        """
+        favorable_price: the best price reached since the last check —
+        current price in live mode, or the candle's high (longs) / low
+        (shorts) in OHLC backtest mode, representing the best price reached
+        during that candle. No-ops entirely unless
+        PAPER_TRADING_TRAILING_STOP_ENABLED and the position has a real
+        ATR recorded at entry (0.0 for positions opened before this field
+        existed, or if ATR genuinely couldn't be computed yet).
+
+        Once profit reaches PAPER_TRADING_TRAILING_ACTIVATION_R multiples
+        of the position's own initial risk, the stop starts trailing
+        PAPER_TRADING_TRAILING_ATR_MULTIPLE x ATR behind the best price
+        seen — and only ever tightens (max() for longs, min() for shorts),
+        never loosens back out even if price pulls back before reversing
+        further favorably.
+        """
+        if not settings.PAPER_TRADING_TRAILING_STOP_ENABLED or not pos.atr_at_entry:
+            return
+        initial_risk = abs(pos.entry_price - pos.stop_loss)
+        if initial_risk <= 0:
+            return
+
+        if pos.direction == "long":
+            profit_r = (favorable_price - pos.entry_price) / initial_risk
+            if profit_r < settings.PAPER_TRADING_TRAILING_ACTIVATION_R:
+                return
+            candidate = favorable_price - settings.PAPER_TRADING_TRAILING_ATR_MULTIPLE * pos.atr_at_entry
+            pos.trailing_stop = candidate if pos.trailing_stop is None else max(pos.trailing_stop, candidate)
+        else:
+            profit_r = (pos.entry_price - favorable_price) / initial_risk
+            if profit_r < settings.PAPER_TRADING_TRAILING_ACTIVATION_R:
+                return
+            candidate = favorable_price + settings.PAPER_TRADING_TRAILING_ATR_MULTIPLE * pos.atr_at_entry
+            pos.trailing_stop = candidate if pos.trailing_stop is None else min(pos.trailing_stop, candidate)
+
+    def _effective_stop(self, pos: PaperPosition) -> float:
+        """Tighter of the original fixed stop and any active trailing stop
+        — trailing only ever protects further, never loosens the original
+        risk the position was sized against."""
+        if pos.trailing_stop is None:
+            return pos.stop_loss
+        return max(pos.stop_loss, pos.trailing_stop) if pos.direction == "long" else min(pos.stop_loss, pos.trailing_stop)
 
     def check_and_close(self, current_prices: dict[str, float]) -> None:
         """Live mode: check open positions against a single latest price per symbol."""
@@ -286,14 +338,17 @@ class PaperTradingLedger:
                     self._close(key, pos, pos.liquidation_price, "loss", closed_at=None, liquidated=True)
                     continue
 
+            self._maybe_update_trailing_stop(pos, price)
+            effective_stop = self._effective_stop(pos)
+
             if pos.direction == "long":
-                hit_sl, hit_tp = price <= pos.stop_loss, price >= pos.target
+                hit_sl, hit_tp = price <= effective_stop, price >= pos.target
             else:  # short
-                hit_sl, hit_tp = price >= pos.stop_loss, price <= pos.target
+                hit_sl, hit_tp = price >= effective_stop, price <= pos.target
 
             if hit_sl or hit_tp:
-                exit_price = pos.stop_loss if hit_sl else pos.target
-                self._close(key, pos, exit_price, "loss" if hit_sl else "win", closed_at=None)
+                exit_price = effective_stop if hit_sl else pos.target
+                self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=None)
 
     def check_and_close_ohlc(self, symbol: str, low: float, high: float, closed_at: str, timeframe: str | None = None) -> None:
         """
@@ -301,7 +356,13 @@ class PaperTradingLedger:
         range instead of a single price, since intrabar price action isn't
         known from OHLC alone. If both SL and TP fall inside the same
         candle's range, conservatively assume SL was hit first — avoids an
-        optimistic look-ahead bias in the backtested win rate.
+        optimistic look-ahead bias in the backtested win rate. Same
+        approximation extends to trailing: the trail is updated using the
+        candle's OWN favorable extreme (high for longs, low for shorts)
+        before checking the opposite extreme against it, which could in
+        principle overstate how far a trail tightened within one bar —
+        an inherent limit of OHLC-only data, same category as the SL/TP
+        simultaneity assumption above, not a new one.
 
         timeframe: restrict the check to one layer's open positions (a 15m
         candle shouldn't resolve a 1h position). None checks every layer —
@@ -320,14 +381,27 @@ class PaperTradingLedger:
                         self._close(key, pos, pos.liquidation_price, "loss", closed_at=closed_at, liquidated=True)
                         continue
 
+                self._maybe_update_trailing_stop(pos, high if pos.direction == "long" else low)
+                effective_stop = self._effective_stop(pos)
+
                 if pos.direction == "long":
-                    hit_sl, hit_tp = low <= pos.stop_loss, high >= pos.target
+                    hit_sl, hit_tp = low <= effective_stop, high >= pos.target
                 else:  # short
-                    hit_sl, hit_tp = high >= pos.stop_loss, low <= pos.target
+                    hit_sl, hit_tp = high >= effective_stop, low <= pos.target
 
                 if hit_sl or hit_tp:
-                    exit_price = pos.stop_loss if hit_sl else pos.target
-                    self._close(key, pos, exit_price, "loss" if hit_sl else "win", closed_at=closed_at)
+                    exit_price = effective_stop if hit_sl else pos.target
+                    self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=closed_at)
+
+    def _outcome(self, pos: PaperPosition, exit_price: float) -> str:
+        """"win"/"loss" by actual price movement, not just "which boundary
+        was hit" — with a fixed stop these are always the same thing (a
+        stop-loss is by definition on the bad side of entry), but a
+        trailing stop can end up on the GOOD side of entry (it only ever
+        activates after real profit), so an exit "via the stop path" isn't
+        automatically a loss once trailing is active."""
+        sign = 1 if pos.direction == "long" else -1
+        return "win" if (exit_price - pos.entry_price) * sign > 0 else "loss"
 
     def _close(
         self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str,
