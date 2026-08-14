@@ -28,6 +28,7 @@ import yfinance as yf
 
 from config import settings
 from gnn.dataset import TOKEN_FEATURES
+from gnn.feature_norm import compute_feature_stats, normalize_feature_rows, save_feature_norm, should_normalize
 from gnn.trainer import GNNTrainer
 from strategy.smart_money import Candle, SmartMoneyAnalyzer
 
@@ -244,6 +245,35 @@ def main():
             "label": {sym: series[i][1] for sym, series in per_symbol.items()},
         })
     print(f"\nBuilt {len(samples)} joint training samples across {len(per_symbol)} symbols.")
+
+    # Z-score normalize Token features before training, stats persisted per
+    # asset_type so build_hetero_data() applies the same transform at live
+    # inference time (gnn/feature_norm.py). Confirmed via a held-out test
+    # this fixes a real collapse (model returning near-constant output
+    # regardless of input) that raw, unnormalized features caused for the
+    # stock asset class: 55.0% -> 76.9% held-out directional accuracy.
+    #
+    # Gated to stock only — that's the only asset class this was actually
+    # validated on. Applying it unconditionally once bit a live crypto run:
+    # retraining crypto here created gnn_feature_norm_crypto.json, which
+    # the ALREADY-RUNNING crypto process's next build_hetero_data() call
+    # picked up immediately (it's read fresh every inference tick) while
+    # its in-memory model was still the old checkpoint trained on raw
+    # features — an instant train/inference scale mismatch with no error,
+    # just silently wrong GNN confluence values, for as long as the file
+    # existed. Crypto's own ablation test earlier showed GNN confluence has
+    # negligible effect on backtested performance either way, so there's
+    # no established case for normalizing it — don't change what isn't
+    # validated.
+    if should_normalize(settings.ASSET_TYPE):
+        means, stds = compute_feature_stats(samples, len(TOKEN_FEATURES))
+        norm_path = save_feature_norm(means, stds)
+        print(f"Feature normalization stats saved to {norm_path}")
+        for sample in samples:
+            sample["features"] = {
+                sym: normalize_feature_rows([feats], means, stds)[0]
+                for sym, feats in sample["features"].items()
+            }
 
     print("\nBuilding GNN model...")
     trainer = GNNTrainer()
