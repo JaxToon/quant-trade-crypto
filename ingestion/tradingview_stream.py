@@ -31,6 +31,58 @@ MarketType = Literal["crypto", "stock"]
 INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
 
+def _build_tick_data(analysis, interval_str: str, kline_closed: bool) -> dict:
+    """
+    Turns a tradingview_ta Analysis object into the flat dict written to
+    Neo4j and passed to callbacks. Extracted from the polling loop so it's
+    unit-testable without a live network call or async loop.
+
+    Technical indicators are pulled from analysis.indicators (raw numeric
+    values) — NOT analysis.oscillators/moving_averages, whose "COMPUTE"
+    dicts hold per-indicator BUY/SELL/NEUTRAL recommendation LABELS. Using
+    those previously wrote string values that _safe_float() in
+    gnn/dataset.py silently coerced to 0.0 for every stock token, every
+    field, always. Confirmed live: COMPUTE['RSI'] returned 'NEUTRAL' while
+    indicators['RSI'] returned 51.15 for the same AAPL snapshot.
+    """
+    indicators = analysis.indicators
+    macd = indicators.get("MACD.macd", 0)
+    macd_signal = indicators.get("MACD.signal", 0)
+    bb_upper = indicators.get("BB.upper", 0)
+    bb_lower = indicators.get("BB.lower", 0)
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        # Tags which SMC/FVG timeframe layer this tick belongs to — without
+        # this, _enrich_with_smc defaulted to BINANCE_KLINE_INTERVAL
+        # regardless of the actually configured TRADINGVIEW_INTERVAL,
+        # silently looking up the wrong (or a missing) analyzer whenever the
+        # two settings differ.
+        "interval": interval_str,
+        "kline_closed": kline_closed,
+        "price": indicators.get("close", 0),
+        "open": indicators.get("open", 0),
+        "high": indicators.get("high", 0),
+        "low": indicators.get("low", 0),
+        "volume": indicators.get("volume", 0),
+        "change": indicators.get("change", 0),
+        "rsi": indicators.get("RSI", 50),
+        "macd": macd,
+        "macd_signal": macd_signal,
+        "ema_20": indicators.get("EMA20", 0),
+        "ema_50": indicators.get("EMA50", 0),
+        "sma_200": indicators.get("SMA200", 0),
+        "macd_hist": macd - macd_signal,
+        # TradingView doesn't expose a mid band directly, but it's
+        # mathematically (upper+lower)/2 for a symmetric 2-std-dev band —
+        # same value structured_stream.py's crypto-side _bollinger()
+        # computes from scratch for the same reason.
+        "bb_upper": bb_upper,
+        "bb_mid": (bb_upper + bb_lower) / 2,
+        "bb_lower": bb_lower,
+        "recommendation": analysis.summary.get("RECOMMENDATION", "NEUTRAL"),
+    }
+
+
 class TradingViewStream:
     """
     TradingView data stream for real-time market data.
@@ -151,41 +203,7 @@ class TradingViewStream:
                 try:
                     handler = self._handlers[symbol]
                     analysis = handler.get_analysis()
-
-                    # Extract price data
-                    indicators = analysis.indicators
-                    oscillators = analysis.oscillators
-                    moving_averages = analysis.moving_averages
-
-                    data = {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        # Tags which SMC/FVG timeframe layer this tick belongs
-                        # to — without this, _enrich_with_smc defaulted to
-                        # BINANCE_KLINE_INTERVAL regardless of the actually
-                        # configured TRADINGVIEW_INTERVAL, silently looking up
-                        # the wrong (or a missing) analyzer whenever the two
-                        # settings differ.
-                        "interval": self.interval_str,
-                        "kline_closed": self._is_new_bar(symbol),
-                        "price": indicators.get("close", 0),
-                        "open": indicators.get("open", 0),
-                        "high": indicators.get("high", 0),
-                        "low": indicators.get("low", 0),
-                        "volume": indicators.get("volume", 0),
-                        "change": indicators.get("change", 0),
-                        # Technical indicators
-                        "rsi": oscillators.get("COMPUTE", {}).get("RSI", 50),
-                        "macd": oscillators.get("COMPUTE", {}).get("MACD.macd", 0),
-                        "macd_signal": oscillators.get("COMPUTE", {}).get(
-                            "MACD.signal", 0
-                        ),
-                        # Moving averages
-                        "ema_20": moving_averages.get("COMPUTE", {}).get("EMA20", 0),
-                        "ema_50": moving_averages.get("COMPUTE", {}).get("EMA50", 0),
-                        "sma_200": moving_averages.get("COMPUTE", {}).get("SMA200", 0),
-                        # Recommendation
-                        "recommendation": analysis.summary.get("RECOMMENDATION", "NEUTRAL"),
-                    }
+                    data = _build_tick_data(analysis, self.interval_str, self._is_new_bar(symbol))
 
                     # Update Neo4j
                     try:
