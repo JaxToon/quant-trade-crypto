@@ -15,7 +15,15 @@ BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
 
 # ── Asset Selection & Blue Chip Configuration ────────────────────────────
 ASSET_TYPE = os.getenv("ASSET_TYPE", "crypto")  # "crypto" or "stock"
-MARKET_SOURCE = os.getenv("MARKET_SOURCE", "binance")  # "binance" or "tradingview"
+
+# Binance has no stock symbols, so IntegratedMarketStream's "auto" source
+# (main.py's default) must not default to "binance" for the stock asset
+# class — that silently 404s every symbol with APIError(-1121) "Invalid
+# symbol" and never falls back. Same reasoning applies to the TradingView
+# exchange/screener below — "BINANCE"/"crypto" are meaningless for NASDAQ
+# tickers. All three still honor an explicit env override; only the
+# fallback default is asset-aware now, matching WATCHLIST below.
+MARKET_SOURCE = os.getenv("MARKET_SOURCE", "tradingview" if ASSET_TYPE == "stock" else "binance")  # "binance" or "tradingview"
 
 # Symbols to track
 # Crypto Blue Chips (Binance futures pairs)
@@ -28,8 +36,8 @@ STOCK_WATCHLIST = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVG
 WATCHLIST = CRYPTO_WATCHLIST if ASSET_TYPE == "crypto" else STOCK_WATCHLIST
 
 # TradingView configuration
-TRADINGVIEW_EXCHANGE = os.getenv("TRADINGVIEW_EXCHANGE", "BINANCE")  # BINANCE, NASDAQ, NYSE
-TRADINGVIEW_SCREENER = os.getenv("TRADINGVIEW_SCREENER", "crypto")  # crypto, america
+TRADINGVIEW_EXCHANGE = os.getenv("TRADINGVIEW_EXCHANGE", "NASDAQ" if ASSET_TYPE == "stock" else "BINANCE")  # BINANCE, NASDAQ, NYSE
+TRADINGVIEW_SCREENER = os.getenv("TRADINGVIEW_SCREENER", "america" if ASSET_TYPE == "stock" else "crypto")  # crypto, america
 TRADINGVIEW_INTERVAL = os.getenv("TRADINGVIEW_INTERVAL", "1m")  # 1m, 5m, 15m, 1h, 4h, 1d
 
 # ── OpenAI (multi-agent LLM consensus) ────────────────────────────────────
