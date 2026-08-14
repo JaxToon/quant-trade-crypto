@@ -3,11 +3,19 @@ Hidden Markov Model regime classifier.
 States: 0=LOW_VOLATILITY, 1=NORMAL, 2=HIGH_STRESS_TURBULENT
 
 Features:
-  - BTC 24h volatility (std of log returns)
-  - BTC 24h absolute price change %
+  - Benchmark 24h volatility (std of log returns)
+  - Benchmark 24h absolute price change %
   - Fear & Greed Index (free alternative.me API)
 
-Fitted on recent Binance kline history; refitted weekly.
+Benchmark is BTC for crypto, SPY for stock (see BENCHMARK below) — found
+this was hardcoded to BTC regardless of ASSET_TYPE while checking whether
+crypto and stock could run simultaneously: a stock process's bear-veto
+circuit breaker would have been reacting to crypto market stress, not
+equity market stress. Checkpoint is asset-type-suffixed for the same
+reason — a crypto and a stock process running at once would otherwise
+silently overwrite each other's fitted regime model.
+
+Fitted on recent hourly benchmark history; refitted weekly.
 """
 from __future__ import annotations
 
@@ -25,7 +33,13 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-HMM_CHECKPOINT = "model_checkpoints/hmm_regime.pkl"
+# Binance only lists crypto pairs — SPY (S&P 500 ETF) is the stock-side
+# proxy for "is the broad market stressed right now", fetched via yfinance
+# only (no Binance leg to try for an equity ticker).
+BENCHMARK = {"crypto": "BTCUSDT", "stock": "SPY"}
+BENCHMARK_YF_TICKER = {"crypto": "BTC-USD", "stock": "SPY"}
+
+HMM_CHECKPOINT = f"model_checkpoints/hmm_regime_{settings.ASSET_TYPE}.pkl"
 FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=1"
 
 
@@ -34,6 +48,8 @@ class RegimeDetector:
     def __init__(self) -> None:
         self._model: Optional[hmm.GaussianHMM] = None
         self._last_state: int = 1  # default: NORMAL
+        self._benchmark = BENCHMARK.get(settings.ASSET_TYPE, "BTCUSDT")
+        self._benchmark_yf = BENCHMARK_YF_TICKER.get(settings.ASSET_TYPE, "BTC-USD")
         self._load()
 
     # ── Model persistence ──────────────────────────────────────────────────
@@ -60,66 +76,68 @@ class RegimeDetector:
         except Exception:
             return 0.5  # neutral on failure
 
-    def _fetch_btc_volatility(self, client=None) -> tuple[float, float]:
-        """Returns (24h_vol, 24h_change_pct). Tries Binance REST, falls back to yfinance."""
-        # Try Binance public REST first
-        try:
-            resp = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1h", "limit": 25},
-                timeout=5,
-            )
-            resp.raise_for_status()
-            closes = [float(k[4]) for k in resp.json()]
-            log_returns = [np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
-            return float(np.std(log_returns)), abs((closes[-1] - closes[0]) / closes[0])
-        except Exception:
-            pass
+    def _fetch_benchmark_volatility(self, client=None) -> tuple[float, float]:
+        """Returns (24h_vol, 24h_change_pct) for this asset type's benchmark
+        (BTCUSDT for crypto, SPY for stock). Binance REST first (crypto
+        only — it doesn't list SPY), yfinance fallback otherwise."""
+        if settings.ASSET_TYPE == "crypto":
+            try:
+                resp = requests.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params={"symbol": self._benchmark, "interval": "1h", "limit": 25},
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                closes = [float(k[4]) for k in resp.json()]
+                log_returns = [np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+                return float(np.std(log_returns)), abs((closes[-1] - closes[0]) / closes[0])
+            except Exception:
+                pass
 
-        # Fallback: yfinance (works globally)
         try:
             import yfinance as yf
-            df = yf.download("BTC-USD", period="2d", interval="1h", progress=False, auto_adjust=True)
+            df = yf.download(self._benchmark_yf, period="2d", interval="1h", progress=False, auto_adjust=True)
             closes = df["Close"].dropna().values.flatten().tolist()
             if len(closes) >= 2:
                 log_returns = [np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
                 return float(np.std(log_returns)), abs((closes[-1] - closes[0]) / closes[0])
         except Exception as exc:
-            logger.warning("BTC volatility yfinance fallback failed: %s", exc)
+            logger.warning("%s volatility yfinance fallback failed: %s", self._benchmark, exc)
 
         return 0.01, 0.01
 
     # ── Training ───────────────────────────────────────────────────────────
 
-    def _fetch_btc_closes(self, days: int) -> list[float]:
-        """Hourly BTC closes for `fit()`. Binance REST first, yfinance fallback
-        (mirrors _fetch_btc_volatility() — fit() previously had NO fallback at
-        all, so any transient Binance hiccup silently left fit() as a no-op,
-        quietly keeping whatever model — possibly a broken one — was already
-        on disk)."""
-        try:
-            resp = requests.get(
-                "https://api.binance.com/api/v3/klines",
-                params={"symbol": "BTCUSDT", "interval": "1h", "limit": min(days * 24, 1000)},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return [float(k[4]) for k in resp.json()]
-        except Exception as exc:
-            logger.warning("HMM fit: Binance klines fetch failed (%s), trying yfinance fallback", exc)
+    def _fetch_benchmark_closes(self, days: int) -> list[float]:
+        """Hourly benchmark closes for `fit()`. Binance REST first (crypto
+        only), yfinance fallback otherwise (fit() previously had NO fallback
+        at all for crypto, so any transient Binance hiccup silently left
+        fit() as a no-op, quietly keeping whatever model — possibly a
+        broken one — was already on disk)."""
+        if settings.ASSET_TYPE == "crypto":
+            try:
+                resp = requests.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params={"symbol": self._benchmark, "interval": "1h", "limit": min(days * 24, 1000)},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                return [float(k[4]) for k in resp.json()]
+            except Exception as exc:
+                logger.warning("HMM fit: Binance klines fetch failed (%s), trying yfinance fallback", exc)
 
         import yfinance as yf
-        df = yf.download("BTC-USD", period=f"{min(days, 730)}d", interval="1h", progress=False, auto_adjust=True)
+        df = yf.download(self._benchmark_yf, period=f"{min(days, 730)}d", interval="1h", progress=False, auto_adjust=True)
         return df["Close"].dropna().values.flatten().tolist()
 
     def fit(self, client, days: int = 60) -> None:
         """
-        Fit HMM on `days` of hourly BTC data.
+        Fit HMM on `days` of hourly benchmark data.
         Called once at startup and weekly via scheduler.
         """
-        logger.info("Fitting HMM on %d days of BTC data...", days)
+        logger.info("Fitting HMM on %d days of %s data...", days, self._benchmark)
         try:
-            closes = self._fetch_btc_closes(days)
+            closes = self._fetch_benchmark_closes(days)
             log_returns = np.array([np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))])
 
             # Sanity check BEFORE fitting: a bad/garbled API response (e.g. an
@@ -139,7 +157,7 @@ class RegimeDetector:
 
             vol = np.array([np.std(log_returns[max(0, i - 23):i + 1]) for i in range(len(log_returns))])
             # 24h cumulative % change over the SAME rolling window `vol` uses —
-            # matches _fetch_btc_volatility()'s live feature exactly (that
+            # matches _fetch_benchmark_volatility()'s live feature exactly (that
             # computes abs total move over a 24h window, not a single candle).
             # This used to be np.abs(log_returns) — a single hour's move — so
             # the model was trained on one statistic and fed a completely
@@ -178,7 +196,7 @@ class RegimeDetector:
             logger.warning("HMM not fitted; returning NORMAL regime.")
             return 1
 
-        vol, change = self._fetch_btc_volatility(client)
+        vol, change = self._fetch_benchmark_volatility(client)
         fg = self._fetch_fear_greed()
         # Use vol + change as features (fear_greed can be added as 3rd dim if desired)
         obs = np.array([[vol, change]])
