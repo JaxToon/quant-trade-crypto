@@ -140,6 +140,14 @@ class TradingViewStream:
                 if symbol not in self._handlers:
                     continue
 
+                # Space out per-symbol requests instead of firing all of
+                # them back-to-back — confirmed live that TradingView's free
+                # API rate-limits (HTTP 429) a tight loop over 8 symbols
+                # within about a second, failing every single symbol every
+                # cycle. 1s/symbol still fits comfortably inside the 30s+
+                # poll intervals _get_poll_interval() uses for 5m and up.
+                await asyncio.sleep(1.0)
+
                 try:
                     handler = self._handlers[symbol]
                     analysis = handler.get_analysis()
