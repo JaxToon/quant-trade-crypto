@@ -5,7 +5,7 @@ States: 0=LOW_VOLATILITY, 1=NORMAL, 2=HIGH_STRESS_TURBULENT
 Features:
   - Benchmark 24h volatility (std of log returns)
   - Benchmark 24h absolute price change %
-  - Fear & Greed Index (free alternative.me API)
+  - Fear & Greed Index (crypto only — see below)
 
 Benchmark is BTC for crypto, SPY for stock (see BENCHMARK below) — found
 this was hardcoded to BTC regardless of ASSET_TYPE while checking whether
@@ -14,6 +14,25 @@ circuit breaker would have been reacting to crypto market stress, not
 equity market stress. Checkpoint is asset-type-suffixed for the same
 reason — a crypto and a stock process running at once would otherwise
 silently overwrite each other's fitted regime model.
+
+Fear & Greed is fetched from alternative.me, which is specifically a
+CRYPTO sentiment index — not a general market sentiment gauge. It used to
+be fetched every detect_regime() call and then thrown away entirely
+("can be added as 3rd dim if desired") despite being free/already paid
+for in API-call terms. Now actually used as a 3rd feature dimension, but
+ONLY for crypto — reusing it for stock would repeat the exact mismatch
+this file's benchmark fix (BTC vol used for stock regime) just corrected.
+Stock keeps the original 2-feature (vol, change) model.
+
+Also found live (user's own observation, not assumed): even with 3
+features, requesting 3 HMM states from vol+change alone tends to collapse
+2 of them into a near-identical "calm" cluster when the training window
+doesn't contain much genuine stress — confirmed empirically (180d window
+didn't fix it either). This has ZERO behavioral effect since
+circuit_breaker.py only ever checks state == HMM_TURBULENT_STATE (2);
+states 0 and 1 are treated identically. Adding Fear & Greed may or may not
+sharpen that separation — not verified either way, worth re-checking after
+a live refit.
 
 Fitted on recent hourly benchmark history; refitted weekly.
 """
@@ -75,6 +94,24 @@ class RegimeDetector:
             return float(data["data"][0]["value"]) / 100.0
         except Exception:
             return 0.5  # neutral on failure
+
+    def _fetch_fear_greed_history(self, days: int) -> dict:
+        """Returns {date: normalized F&G value} for fit()'s training window
+        (crypto only — see module docstring for why). alternative.me serves
+        one value PER DAY, while the price data fit() trains on is hourly —
+        this dict gets looked up per-hour by calendar date, forward-filled
+        naturally since the caller just skips missing dates."""
+        try:
+            resp = requests.get("https://api.alternative.me/fng/", params={"limit": days}, timeout=10)
+            resp.raise_for_status()
+            history = {}
+            for entry in resp.json().get("data", []):
+                day = datetime.utcfromtimestamp(int(entry["timestamp"])).date()
+                history[day] = float(entry["value"]) / 100.0
+            return history
+        except Exception as exc:
+            logger.warning("Fear & Greed history fetch failed: %s", exc)
+            return {}
 
     def _fetch_benchmark_volatility(self, client=None) -> tuple[float, float]:
         """Returns (24h_vol, 24h_change_pct) for this asset type's benchmark
@@ -168,8 +205,29 @@ class RegimeDetector:
                 abs((closes[i + 1] - closes[max(0, i + 1 - 24)]) / closes[max(0, i + 1 - 24)])
                 for i in range(len(log_returns))
             ])
-            # Feature matrix: [rolling 24h volatility, rolling 24h abs % change]
-            X = np.column_stack([vol, abs_change])
+
+            # Fear & Greed as a 3rd feature — crypto only (see module
+            # docstring). closes has no real timestamps attached (it's a
+            # plain list of floats), so approximate: assume the fetch is
+            # contiguous hourly candles ending "now" — the same implicit
+            # assumption vol/abs_change's positional-index windowing above
+            # already relies on, not a new one. Missing days (weekends in
+            # the daily F&G feed, gaps, etc.) fall back to neutral (0.5)
+            # rather than skewing the fit with a fabricated value.
+            fg_feature = None
+            if settings.ASSET_TYPE == "crypto":
+                fg_history = self._fetch_fear_greed_history(days)
+                if fg_history:
+                    now = datetime.utcnow()
+                    n_closes = len(closes)
+                    fg_feature = np.array([
+                        fg_history.get((now - timedelta(hours=n_closes - 1 - (i + 1))).date(), 0.5)
+                        for i in range(len(log_returns))
+                    ])
+
+            # Feature matrix: [rolling 24h volatility, rolling 24h abs %
+            # change] (+ Fear & Greed for crypto)
+            X = np.column_stack([vol, abs_change, fg_feature]) if fg_feature is not None else np.column_stack([vol, abs_change])
 
             self._model = hmm.GaussianHMM(
                 n_components=settings.HMM_N_STATES,
@@ -197,9 +255,15 @@ class RegimeDetector:
             return 1
 
         vol, change = self._fetch_benchmark_volatility(client)
-        fg = self._fetch_fear_greed()
-        # Use vol + change as features (fear_greed can be added as 3rd dim if desired)
-        obs = np.array([[vol, change]])
+        # Match whatever the LOADED model was actually trained with, rather
+        # than re-deriving from settings.ASSET_TYPE — makes an old 2-feature
+        # checkpoint (from before this change) still usable without a shape
+        # mismatch until it's refit under the new 3-feature schema.
+        if self._model.means_.shape[1] >= 3:
+            fg = self._fetch_fear_greed()
+            obs = np.array([[vol, change, fg]])
+        else:
+            obs = np.array([[vol, change]])
         try:
             raw_state = self._model.predict(obs)[0]
             # Re-map raw states to ordered volatility regimes
