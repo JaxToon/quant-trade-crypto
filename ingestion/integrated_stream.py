@@ -30,7 +30,7 @@ class IntegratedMarketStream:
     def __init__(self, source: str = "auto"):
         """
         Args:
-            source: "binance", "tradingview", or "auto" (auto-detect from config)
+            source: "binance", "tradingview", "yfinance", or "auto" (auto-detect from config)
         """
         self.source = self._determine_source(source)
         # Keyed by (symbol, timeframe) — SMC/FVG runs independently per layer
@@ -43,7 +43,14 @@ class IntegratedMarketStream:
         self.candle_buffers: dict[str, list] = defaultdict(list)
         self._callbacks: list[Callable[[str, dict], None]] = []
 
-        timeframes = settings.BINANCE_SMC_TIMEFRAMES if self.source == "binance" else [settings.TRADINGVIEW_INTERVAL]
+        # yfinance gets the SAME multi-timeframe layering as Binance/crypto
+        # (not TradingView's single-interval limitation) — Stage 4 of the
+        # stock data-path validation explicitly wants signal counts/rejection
+        # reasons compared against the crypto baseline apples-to-apples.
+        if self.source in ("binance", "yfinance"):
+            timeframes = settings.BINANCE_SMC_TIMEFRAMES
+        else:
+            timeframes = [settings.TRADINGVIEW_INTERVAL]
         self._timeframes = timeframes
         for symbol in settings.WATCHLIST:
             for tf in timeframes:
@@ -69,23 +76,36 @@ class IntegratedMarketStream:
             return source
 
         market_source = settings.MARKET_SOURCE.lower()
-        if market_source == "tradingview":
-            return "tradingview"
-        else:
-            return "binance"
+        if market_source in ("tradingview", "yfinance"):
+            return market_source
+        return "binance"
 
     def add_callback(self, fn: Callable[[str, dict], None]) -> None:
         """Register callback to receive (symbol, enriched_data) on each tick."""
         self._callbacks.append(fn)
 
     async def start(self) -> None:
-        """Start the integrated stream based on configured source."""
+        """
+        Start the integrated stream based on configured source.
+
+        Was `if binance: backfill(); if tradingview: ...; else:
+        start_binance()` — a 3rd source value (yfinance) matched neither
+        `if`, fell through to the `else`, and would have silently started
+        the BINANCE stream instead. Same class of bug as MARKET_SOURCE's
+        earlier non-asset-aware default: a source dispatch that only
+        explicitly handles 2 of N values and treats "no match" as "assume
+        the first one" instead of erroring.
+        """
         if self.source == "binance":
             self._backfill_history()
-        if self.source == "tradingview":
-            await self._start_tradingview_stream()
-        else:
             await self._start_binance_stream()
+        elif self.source == "tradingview":
+            await self._start_tradingview_stream()
+        elif self.source == "yfinance":
+            self._backfill_yfinance_history()
+            await self._start_yfinance_stream()
+        else:
+            raise ValueError(f"Unknown market data source: {self.source!r}")
 
     def _backfill_history(self) -> None:
         """
@@ -132,6 +152,60 @@ class IntegratedMarketStream:
                     fvg.update_all(analyzer.candles[-1].close)
                 logger.info("SMC backfilled %s [%s]: %d candles", symbol, tf, len(klines))
 
+    def _backfill_yfinance_history(self) -> None:
+        """
+        Same purpose as _backfill_history() (Binance) — warm up SMC/FVG
+        state so entry insight isn't blank for the first
+        SMC_LOOKBACK_CANDLES bars after every restart. TradingViewStream's
+        path never had this (stock previously started cold every time),
+        so this is a genuine improvement for the yfinance path specifically,
+        not just parity.
+
+        Regular session only, matching ingestion/yfinance_stream.py's own
+        reasoning — extended-hours data is thin/zero-volume noise.
+        """
+        import pandas as pd
+        import yfinance as yf
+
+        from ingestion.yfinance_stream import FETCH_PERIOD
+
+        for symbol in settings.WATCHLIST:
+            for tf in self._timeframes:
+                period = FETCH_PERIOD.get(tf, "10d")
+                try:
+                    df = yf.download(symbol, period=period, interval=tf, progress=False, auto_adjust=True, prepost=False)
+                except Exception as exc:
+                    logger.warning("yfinance SMC backfill failed for %s [%s]: %s", symbol, tf, exc)
+                    continue
+                if df.empty:
+                    continue
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
+                # Drop the last row — same still-forming-candle reasoning
+                # as YFinanceStream._poll_symbol, so backfill never treats
+                # an incomplete bar as historically closed.
+                closed = df.iloc[:-1].tail(settings.SMC_LOOKBACK_CANDLES)
+
+                analyzer = self.smc_analyzers[(symbol, tf)]
+                fvg = self.fvg_analyzers[(symbol, tf)]
+                for ts, row in closed.iterrows():
+                    candle = Candle(
+                        timestamp=ts.to_pydatetime().replace(tzinfo=None),
+                        open=float(row["Open"]), high=float(row["High"]), low=float(row["Low"]),
+                        close=float(row["Close"]), volume=float(row["Volume"]),
+                    )
+                    analyzer.update(candle)
+                    candles = list(analyzer.candles)
+                    if len(candles) >= 3:
+                        fvg.detect_fvg(
+                            candles=candles, index=len(candles) - 2,
+                            current_price=candle.close, volume=candle.volume,
+                        )
+                if analyzer.candles:
+                    fvg.update_all(analyzer.candles[-1].close)
+                logger.info("SMC backfilled %s [%s]: %d candles (yfinance)", symbol, tf, len(closed))
+
     async def _start_binance_stream(self) -> None:
         """Start Binance WebSocket stream with SMC overlay."""
         from ingestion.structured_stream import StructuredStream
@@ -162,6 +236,27 @@ class IntegratedMarketStream:
         logger.info("Starting TradingView stream with SMC analysis...")
         await tv_stream.start()
 
+    async def _start_yfinance_stream(self) -> None:
+        """
+        Start yfinance polling with SMC overlay — Stage 3 of the staged
+        stock data-path validation (see ingestion/yfinance_stream.py).
+        Alternative to TradingView, whose free tier rate-limits after ~1
+        poll cycle regardless of pacing.
+
+        One YFinanceStream instance per timeframe, run concurrently — gives
+        the SAME multi-timeframe layering as Binance/crypto (self._timeframes
+        is BINANCE_SMC_TIMEFRAMES for this source, set in __init__) instead
+        of TradingView's single-interval limitation, since Stage 4 wants
+        signal counts compared against the crypto baseline apples-to-apples.
+        """
+        from ingestion.yfinance_stream import YFinanceStream
+
+        logger.info("Starting yfinance stream with SMC analysis (timeframes=%s)...", self._timeframes)
+        streams = [YFinanceStream(interval=tf) for tf in self._timeframes]
+        for s in streams:
+            s.add_callback(self._on_yfinance_tick)
+        await asyncio.gather(*(s.start() for s in streams))
+
     def _on_binance_tick(self, symbol: str, indicators: dict) -> None:
         """Process Binance tick data and enrich with SMC analysis."""
         enriched = self._enrich_with_smc(symbol, indicators)
@@ -169,6 +264,13 @@ class IntegratedMarketStream:
 
     def _on_tradingview_tick(self, symbol: str, data: dict) -> None:
         """Process TradingView tick data and enrich with SMC analysis."""
+        enriched = self._enrich_with_smc(symbol, data)
+        self._fire_callbacks(symbol, enriched)
+
+    def _on_yfinance_tick(self, symbol: str, data: dict) -> None:
+        """Process yfinance tick data and enrich with SMC analysis. data
+        carries an 'interval' tag (unlike TradingView), so _enrich_with_smc
+        routes it to the correct (symbol, timeframe) analyzer layer."""
         enriched = self._enrich_with_smc(symbol, data)
         self._fire_callbacks(symbol, enriched)
 
