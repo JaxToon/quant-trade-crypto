@@ -62,6 +62,62 @@ def no_network(monkeypatch):
     monkeypatch.setattr("requests.get", _blocked)
 
 
+class _FakeKlinesResponse:
+    def __init__(self, closes: list[float]) -> None:
+        self._closes = closes
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self):
+        # Binance kline format: index 4 is the close price, rest unused here.
+        return [[0, "0", "0", "0", str(c), "0"] for c in self._closes]
+
+
+class TestFetchRecentWindowFeatures:
+    """Direct coverage of the new windowed-fetch preprocessing — must match
+    fit()'s feature formula exactly (requirement: identical preprocessing
+    between training and live inference)."""
+
+    def test_returns_correctly_shaped_window(self, monkeypatch):
+        monkeypatch.setattr(settings, "ASSET_TYPE", "crypto")
+        d = RegimeDetector()
+        closes = _synthetic_closes(n=100)
+        monkeypatch.setattr("requests.get", lambda *a, **k: _FakeKlinesResponse(closes))
+
+        result = d._fetch_recent_window_features(window_hours=50)
+
+        assert result is not None
+        X, timestamps = result
+        assert X.shape == (50, 2)
+        assert len(timestamps) == 50
+
+    def test_feature_values_match_fit_formula(self, monkeypatch):
+        """vol = rolling 24h std of log returns, abs_change = rolling 24h
+        cumulative % move — exactly fit()'s np.column_stack([vol, abs_change])."""
+        monkeypatch.setattr(settings, "ASSET_TYPE", "crypto")
+        d = RegimeDetector()
+        closes = _synthetic_closes(n=60)
+        monkeypatch.setattr("requests.get", lambda *a, **k: _FakeKlinesResponse(closes))
+
+        X, _ = d._fetch_recent_window_features(window_hours=30)
+
+        log_returns = [np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        expected_vol = [np.std(log_returns[max(0, i - 23):i + 1]) for i in range(len(log_returns))]
+        expected_change = [
+            abs((closes[i + 1] - closes[max(0, i + 1 - 24)]) / closes[max(0, i + 1 - 24)])
+            for i in range(len(log_returns))
+        ]
+        expected = np.column_stack([expected_vol, expected_change])[-30:]
+        assert np.allclose(X, expected)
+
+    def test_insufficient_data_returns_none(self, monkeypatch):
+        monkeypatch.setattr(settings, "ASSET_TYPE", "crypto")
+        d = RegimeDetector()
+        monkeypatch.setattr("requests.get", lambda *a, **k: _FakeKlinesResponse([100.0, 101.0]))
+        assert d._fetch_recent_window_features(window_hours=50) is None
+
+
 def _synthetic_closes(n: int = 200, seed: int = 42) -> list[float]:
     """A plausible-looking random-walk price series — small per-step
     moves, no absurd single-hour jumps, safely under the fit() sanity
@@ -195,11 +251,13 @@ class TestFearGreedFeature:
         old_style_model.means_ = np.array([[0.01, 0.01], [0.5, 0.5], [0.9, 0.9]])  # only 2 features
         old_style_model.covars_ = np.array([[0.01, 0.01], [0.01, 0.01], [0.01, 0.01]])
         d._model = old_style_model
-        monkeypatch.setattr(d, "_fetch_benchmark_volatility", lambda client=None: (0.01, 0.01))
+        window = np.tile([[0.01, 0.01]], (5, 1))
+        timestamps = [datetime.utcnow() for _ in range(5)]
+        monkeypatch.setattr(d, "_fetch_recent_window_features", lambda hours: (window, timestamps))
 
-        def _should_not_be_called():
-            pytest.fail("Should not fetch Fear & Greed for a 2-feature (old-style) model")
-        monkeypatch.setattr(d, "_fetch_fear_greed", _should_not_be_called)
+        def _should_not_be_called(days):
+            pytest.fail("Should not fetch Fear & Greed history for a 2-feature (old-style) model")
+        monkeypatch.setattr(d, "_fetch_fear_greed_history", _should_not_be_called)
 
         assert d.detect_regime(client=None) == 0  # must not raise on shape mismatch
 
@@ -222,28 +280,80 @@ class TestRegimeOrdering:
         model.covars_ = np.array([[0.01, 0.01], [0.01, 0.01], [0.01, 0.01]])
         return model
 
+    def _window_of(self, vol: float, change: float, n: int = 5) -> tuple[np.ndarray, list]:
+        window = np.tile([[vol, change]], (n, 1))
+        timestamps = [datetime.utcnow() for _ in range(n)]
+        return window, timestamps
+
     def test_calm_observation_classified_as_low_volatility(self, monkeypatch):
         d = RegimeDetector()
         d._model = self._model_with_known_clusters()
-        monkeypatch.setattr(d, "_fetch_benchmark_volatility", lambda client=None: (0.01, 0.01))
-        monkeypatch.setattr(d, "_fetch_fear_greed", lambda: 0.5)
+        monkeypatch.setattr(d, "_fetch_recent_window_features", lambda hours: self._window_of(0.01, 0.01))
         assert d.detect_regime(client=None) == 0
 
     def test_mid_observation_classified_as_normal(self, monkeypatch):
         d = RegimeDetector()
         d._model = self._model_with_known_clusters()
-        monkeypatch.setattr(d, "_fetch_benchmark_volatility", lambda client=None: (0.5, 0.5))
-        monkeypatch.setattr(d, "_fetch_fear_greed", lambda: 0.5)
+        monkeypatch.setattr(d, "_fetch_recent_window_features", lambda hours: self._window_of(0.5, 0.5))
         assert d.detect_regime(client=None) == 1
 
     def test_extreme_observation_classified_as_turbulent(self, monkeypatch):
         d = RegimeDetector()
         d._model = self._model_with_known_clusters()
-        monkeypatch.setattr(d, "_fetch_benchmark_volatility", lambda client=None: (0.9, 0.9))
-        monkeypatch.setattr(d, "_fetch_fear_greed", lambda: 0.5)
+        monkeypatch.setattr(d, "_fetch_recent_window_features", lambda hours: self._window_of(0.9, 0.9))
         assert d.detect_regime(client=None) == 2
 
     def test_no_model_defaults_to_normal(self):
         d = RegimeDetector()
         assert d._model is None
         assert d.detect_regime(client=None) == 1
+
+    def test_window_fetch_failure_falls_back_to_last_known_state(self, monkeypatch):
+        d = RegimeDetector()
+        d._model = self._model_with_known_clusters()
+        d._last_state = 2
+        monkeypatch.setattr(d, "_fetch_recent_window_features", lambda hours: None)
+        assert d.detect_regime(client=None) == 2
+
+
+class TestWindowedDecodeFixesStartprobBug:
+    """
+    The actual bug this session found: detect_regime() used to call
+    model.predict(obs) with a SINGLE observation. For a length-1 sequence,
+    Viterbi reduces to argmax(log(startprob) + log(emission)) — and a
+    Baum-Welch-fitted model's startprob_ can concentrate almost all its
+    mass on one state (confirmed on the live checkpoint: ~1e-134 to ~1.0
+    spread), so single-frame predict() returned that SAME state for
+    virtually any input, regardless of what the observation actually was.
+
+    This test constructs exactly that pathological startprob_ and proves
+    the windowed decode correctly tracks RECENT observations instead of
+    being stuck on the dominant prior state — the single-observation
+    version of this same setup would incorrectly return the startprob-
+    dominant state (0) even though the window's later observations clearly
+    belong to the turbulent cluster (2).
+    """
+
+    def _pathological_model(self) -> hmm.GaussianHMM:
+        model = hmm.GaussianHMM(n_components=3, covariance_type="diag")
+        # Mirrors the real deployed checkpoint's near-degenerate startprob_.
+        model.startprob_ = np.array([1.0 - 2e-10, 1e-10, 1e-10])
+        model.transmat_ = np.array([[0.5, 0.3, 0.2], [0.2, 0.5, 0.3], [0.1, 0.2, 0.7]])
+        model.means_ = np.array([[0.01, 0.01], [0.5, 0.5], [0.9, 0.9]])
+        model.covars_ = np.array([[0.01, 0.01], [0.01, 0.01], [0.01, 0.01]])
+        return model
+
+    def test_recent_turbulent_observations_override_the_dominant_prior(self, monkeypatch):
+        d = RegimeDetector()
+        d._model = self._pathological_model()
+        # First observation matches the startprob-dominant "calm" cluster;
+        # the rest clearly belong to the turbulent cluster — a real window
+        # would look like this right after a regime shift.
+        window = np.array([[0.01, 0.01]] + [[0.9, 0.9]] * 10)
+        timestamps = [datetime.utcnow() for _ in range(len(window))]
+        monkeypatch.setattr(d, "_fetch_recent_window_features", lambda hours: (window, timestamps))
+
+        assert d.detect_regime(client=None) == 2, (
+            "windowed decode must classify based on recent observations, "
+            "not collapse to the startprob-dominant state"
+        )

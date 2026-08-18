@@ -77,6 +77,21 @@ HMM_N_STATES = 3            # 0=low-vol, 1=normal, 2=high-stress-turbulent
 HMM_TURBULENT_STATE = 2
 HMM_RISK_REDUCTION = 0.70   # slash risk 70% in turbulent regime
 
+# detect_regime() used to classify a SINGLE observation at a time, which
+# for a length-1 sequence reduces Viterbi to argmax(log(startprob) +
+# log(emission)) -- startprob_ on the live checkpoint puts ~100% of its
+# mass on one state, so single-frame predict() returned that same state
+# for virtually any input (verified directly against the deployed
+# checkpoint: 0.00% turbulent flagged across a 60+ day walk-forward test,
+# vs 23.6% by a retrospective full-history decode). Fixed by decoding a
+# rolling window of recent observations instead of one point, so
+# transmat_ and emission likelihoods actually drive the decision past the
+# window's first step. 336h (14d) was the smallest window that reaches
+# the agreement plateau against retrospective ground truth (84.7%, same
+# as 500h+) with ~1.6h average detection lag and sub-millisecond decode
+# latency -- see hmm_windowed_decode_experiment.py for the validation.
+HMM_DECODE_WINDOW_HOURS = 336
+
 # ── Temporal graph decay ──────────────────────────────────────────────────
 TEMPORAL_DECAY_GAMMA = 0.001  # γ: edge weight decay per day
 

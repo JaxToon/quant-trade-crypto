@@ -143,6 +143,61 @@ class RegimeDetector:
 
         return 0.01, 0.01
 
+    def _fetch_recent_window_features(self, window_hours: int) -> tuple[np.ndarray, list] | None:
+        """
+        Builds the (window_hours, n_features) feature matrix ending "now",
+        for detect_regime()'s windowed decode — same vol/abs_change
+        preprocessing fit() uses, just over a recent live window instead
+        of the full training history. Needs window_hours+24 raw closes
+        (each feature row needs its own rolling 24h lookback). Returns
+        (X, hour_timestamps) or None on fetch failure — caller falls back
+        to the last known regime rather than guessing.
+        """
+        need = window_hours + 24
+        closes: list[float] | None = None
+
+        if settings.ASSET_TYPE == "crypto":
+            try:
+                resp = requests.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params={"symbol": self._benchmark, "interval": "1h", "limit": min(need, 1000)},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                closes = [float(k[4]) for k in resp.json()]
+            except Exception as exc:
+                logger.warning("HMM window fetch: Binance klines failed (%s), trying yfinance", exc)
+
+        if not closes:
+            try:
+                import yfinance as yf
+                df = yf.download(
+                    self._benchmark_yf, period=f"{min(need // 24 + 2, 730)}d", interval="1h",
+                    progress=False, auto_adjust=True,
+                )
+                closes = df["Close"].dropna().values.flatten().tolist()
+            except Exception as exc:
+                logger.warning("HMM window fetch: yfinance fallback failed: %s", exc)
+                return None
+
+        if not closes or len(closes) < 25:
+            return None
+
+        log_returns = [np.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        vol = [np.std(log_returns[max(0, i - 23):i + 1]) for i in range(len(log_returns))]
+        abs_change = [
+            abs((closes[i + 1] - closes[max(0, i + 1 - 24)]) / closes[max(0, i + 1 - 24)])
+            for i in range(len(log_returns))
+        ]
+        X = np.column_stack([vol, abs_change])[-window_hours:]
+
+        # Approximate real hour timestamps for the returned rows — used only
+        # to look up per-day Fear & Greed values below, same approximation
+        # fit() already makes (contiguous hourly candles ending "now").
+        now = datetime.utcnow()
+        hour_timestamps = [now - timedelta(hours=len(X) - 1 - i) for i in range(len(X))]
+        return X, hour_timestamps
+
     # ── Training ───────────────────────────────────────────────────────────
 
     def _fetch_benchmark_closes(self, days: int) -> list[float]:
@@ -249,29 +304,55 @@ class RegimeDetector:
         State mapping is determined by variance of fitted Gaussians:
           lowest variance → state 0 (low-vol)
           highest variance → state 2 (turbulent)
+
+        Decodes a rolling window of the last HMM_DECODE_WINDOW_HOURS
+        observations (Viterbi), not a single point — feeding predict() one
+        observation at a time reduces a length-1 sequence's Viterbi to
+        argmax(log(startprob) + log(emission)), and startprob_ on a
+        Baum-Welch-fitted model tends to concentrate almost all its mass on
+        one state (confirmed on the live checkpoint: ~1e-134 to ~1.0 spread
+        across states), so single-frame predict() returned that SAME state
+        for virtually any input — verified empirically: 0.00% turbulent
+        flagged across a 60+ day walk-forward test, vs 23.6% by a
+        retrospective full-history decode. A window lets transmat_ and each
+        observation's own emission likelihood actually drive the decision
+        past its first step. 336h was the smallest window that reached the
+        agreement plateau against retrospective ground truth in validation
+        (84.7%, same as 500h+), with ~1.6h average detection lag and
+        sub-millisecond decode latency — see
+        hmm_windowed_decode_experiment.py.
         """
         if self._model is None:
             logger.warning("HMM not fitted; returning NORMAL regime.")
             return 1
 
-        vol, change = self._fetch_benchmark_volatility(client)
+        fetched = self._fetch_recent_window_features(settings.HMM_DECODE_WINDOW_HOURS)
+        if fetched is None:
+            logger.warning("HMM window fetch failed; reusing last known regime.")
+            return self._last_state
+        X, hour_timestamps = fetched
+
         # Match whatever the LOADED model was actually trained with, rather
         # than re-deriving from settings.ASSET_TYPE — makes an old 2-feature
         # checkpoint (from before this change) still usable without a shape
         # mismatch until it's refit under the new 3-feature schema.
         if self._model.means_.shape[1] >= 3:
-            fg = self._fetch_fear_greed()
-            obs = np.array([[vol, change, fg]])
-        else:
-            obs = np.array([[vol, change]])
+            fg_history = self._fetch_fear_greed_history(settings.HMM_DECODE_WINDOW_HOURS // 24 + 2)
+            fg_col = np.array([fg_history.get(ts.date(), 0.5) for ts in hour_timestamps])
+            X = np.column_stack([X, fg_col])
+
         try:
-            raw_state = self._model.predict(obs)[0]
+            raw_path = self._model.predict(X)
+            raw_state = raw_path[-1]
             # Re-map raw states to ordered volatility regimes
             means = self._model.means_[:, 0]  # mean volatility per state
             order = np.argsort(means)          # 0=lowest vol, 2=highest vol
             ordered_state = int(np.where(order == raw_state)[0][0])
             self._last_state = ordered_state
-            logger.debug("HMM regime: raw=%d → ordered=%d (vol=%.5f)", raw_state, ordered_state, vol)
+            logger.debug(
+                "HMM regime (windowed, %dh): raw=%d → ordered=%d (vol=%.5f)",
+                settings.HMM_DECODE_WINDOW_HOURS, raw_state, ordered_state, float(X[-1, 0]),
+            )
             return ordered_state
         except Exception as exc:
             logger.warning("HMM predict error: %s", exc)
