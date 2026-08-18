@@ -73,8 +73,17 @@ BACKTRACK_LAMBDA = 0.5      # λ in contrastive loss formula
 BACKTRACK_LOG_DIR = "backtrack_logs"
 
 # ── HMM regime detection ──────────────────────────────────────────────────
-HMM_N_STATES = 3            # 0=low-vol, 1=normal, 2=high-stress-turbulent
-HMM_TURBULENT_STATE = 2
+# Was 3 states (0=low-vol, 1=normal, 2=high-stress-turbulent), but states 0
+# and 1 were consistently near-identical in mean volatility (~0.3%
+# separation, vs ~74-80% between the calm pair and the turbulent state) —
+# a genuine 2-regime process at this resolution, not 3. Confirmed via a
+# direct A/B: 2-state vs 3-state produce IDENTICAL turbulent/calm
+# classification for every trade tested (circuit_breaker.py already
+# treated states 0/1 identically, so this changes nothing behaviorally —
+# housekeeping/correctness, not an optimization). See
+# hmm_regime_ab_experiment.py for the comparison.
+HMM_N_STATES = 2            # 0=low-vol/calm, 1=high-stress-turbulent
+HMM_TURBULENT_STATE = 1
 HMM_RISK_REDUCTION = 0.70   # slash risk 70% in turbulent regime
 
 # detect_regime() used to classify a SINGLE observation at a time, which

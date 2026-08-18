@@ -13,7 +13,12 @@ from risk.hmm_regime import RegimeDetector
 
 logger = logging.getLogger(__name__)
 
-REGIME_LABELS = {0: "LOW_VOLATILITY", 1: "NORMAL", 2: "HIGH_STRESS_TURBULENT"}
+# 2 states (was 3 — see config/settings.py's HMM_N_STATES comment for why).
+# Keeping the same label STRINGS as before (not renaming to e.g. "CALM")
+# deliberately — dashboard/index.html and dashboard/api.py's log-fallback
+# parsing both already key off these exact strings, and reusing them
+# avoids having to touch either just for a state-count change.
+REGIME_LABELS = {0: "LOW_VOLATILITY", 1: "HIGH_STRESS_TURBULENT"}
 
 
 class CircuitBreaker:

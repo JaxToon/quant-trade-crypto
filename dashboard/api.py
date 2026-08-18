@@ -105,8 +105,8 @@ def status():
                 live["regime"] = "HIGH_STRESS_TURBULENT"
                 live["bear_veto"] = True
                 break
-            elif "NORMAL" in line and "REGIME" in line:
-                live["regime"] = "NORMAL"
+            elif "LOW_VOLATILITY" in line and "REGIME" in line:
+                live["regime"] = "LOW_VOLATILITY"
                 live["bear_veto"] = False
                 break
 
