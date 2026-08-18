@@ -8,12 +8,14 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 - **No real money at risk right now.** There are two separate decision paths, both simulated:
   1. **SMC/FVG entry-insight + $10k virtual paper-trading ledger** — read-only dashboard recommendations, scored against live price with a fixed-risk simulated account. This is the path with real backtested evidence behind it.
   2. **Multi-agent LLM consensus (Bull/Bear/Critic) + Binance testnet orders** — a separate, independent path (`strategy/agents.py` → `consensus.py` → `execution.py`). Places real orders, but only on Binance's testnet (fake funds).
-- **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap.
+- **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap. A separate target/exit backtest matrix (`backtest_target_matrix.py`) confirmed the live FVG-gap-based target is already the best of 7 tested variants at 5m/15m on expectancy *and* drawdown — wider targets (1-2x the gap, or fixed 2R/3R/5R) are strictly worse, monotonically, the wider they get.
 - **What's not yet proven:**
   - **GNN's contribution is measured as negligible** in a properly controlled ablation (SMC-only vs SMC+GNN: identical win rate, identical trade count, on real data).
-  - **The stock/NASDAQ path has full infrastructure but has never actually been run** — flip `ASSET_TYPE=stock`, train the GNN for it, and it's untested territory.
-  - **The LLM-consensus/testnet path's decision quality is unaudited** — it has literally never closed a trade (a since-fixed regime-detection bug blocked it entirely until 2026-08-14), and its execute threshold appears very hard to reach given the formula's own math (see `TRADE_THRESHOLD` in Configuration below).
+  - **The stock/NASDAQ path now runs end-to-end** (yfinance → `IntegratedMarketStream` → SMC/FVG → GNN → `entry_insight` → paper ledger, verified live with real backfilled data and zero errors) but is still in its first observation window — no live samples yet to judge it by. See "Switch to Stock Trading" below.
+  - **The LLM-consensus/testnet path's decision quality is unaudited** — it has literally never closed a trade, and its execute threshold appears very hard to reach given the formula's own math (see `TRADE_THRESHOLD` in Configuration below).
   - **Live paper-trading sample size is still small** — treat the backtested numbers as evidence, not proof; the live ledger needs weeks more real time to accumulate before its own win rate means much.
+  - **A regime-based entry filter for Path 1 was tested and rejected**: skipping trades while the HMM benchmark reads "turbulent" made expectancy and win rate *worse* at 5m/15m, and even where it looked better at 1h, drawdown got worse. See `hmm_regime_filter_backtest.py` — not deployed, kept only as documented negative evidence.
+- **A real regime-detection bug was found and fixed this session**: `detect_regime()` classified one observation at a time, which for a length-1 HMM sequence is dominated by the model's learned `startprob_` almost regardless of input — verified directly against the deployed checkpoint that the bear-veto circuit breaker had likely never fired from real market conditions (0.00% turbulent flagged across a 60+ day walk-forward test). Fixed via a rolling-window decode; see `risk/hmm_regime.py` and `hmm_windowed_decode_experiment.py`.
 - **Where to look next:** `DEPLOYMENT.md` for persistence/cloud-deployment notes, `python backtest.py --help`-style flags below for validation tooling, `dashboard/consensus_history.json` (via `/api/status`) for the LLM-consensus path's live decision history.
 
 ---
@@ -23,7 +25,7 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 ### Core Trading System
 - **Graph Neural Network (GNN)** — Heterogeneous Graph Transformer (`gnn/model.py: HGTSignalModel`) for price-signal prediction over the knowledge graph
 - **Multi-Agent LLM Consensus** (Bull, Bear, Critic agents) for the separate testnet-execution path
-- **HMM Regime Detection** with a circuit breaker (bear veto + risk cut in turbulent regimes) — feeds the LLM-consensus path only
+- **HMM Regime Detection** with a circuit breaker (bear veto + risk cut in turbulent regime) — feeds the LLM-consensus path only. 2-state (low-vol/turbulent) as of this writing — was 3-state, but the middle "normal" state was consistently near-identical to "low-vol" (~0.3% mean-vol separation vs ~74-80% against the genuinely distinct turbulent state), a real 2-regime process at this resolution, not 3. Confirmed via A/B that this changes nothing behaviorally. Decodes a rolling window of recent observations rather than one point at a time — see the bug note in the TL;DR.
 - **Neo4j Knowledge Graph** for token/protocol relationships and news-derived edges
 - **Continual Learning** — two independent loops: contrastive fine-tuning from realized paper-trade outcomes (`backtrack/continual_learning.py`), and nightly post-mortem causal discovery from real testnet losses (`backtrack/post_mortem.py`, dormant until the LLM-consensus path actually closes a trade)
 
@@ -57,8 +59,8 @@ High-quality asset selection:
 
 ### Data Sources
 - **Binance**: Real-time crypto WebSocket (default), klines on 5m/15m/1h simultaneously
-- **TradingView**: Multi-market support (crypto, stocks, forex) — needed for the stock path since Binance doesn't list equities
-- **yfinance**: Historical backtesting data source (`backtest.py`, `train_gnn.py`) — up to 60 days at 5m/15m, 730 days at 1h
+- **TradingView**: Multi-market support (crypto, stocks, forex) — an option for the stock path since Binance doesn't list equities, but its free tier rate-limits after ~1 poll cycle regardless of pacing (documented, unresolved external constraint)
+- **yfinance**: Historical backtesting data source (`backtest.py`, `train_gnn.py`, up to 60 days at 5m/15m and 730 days at 1h) *and* a live-ish polling stream for the stock path (`ingestion/yfinance_stream.py`) — regular session only (prepost=False; extended-hours 1m data is frequently zero-volume noise), same 5m/15m/1h multi-timeframe layering as Binance. Verified live that repeated polling against genuinely static (market-closed) data produces zero duplicate/fake ticks, and that day/weekend session boundaries are handled correctly with no fabricated bars.
 
 ---
 
@@ -114,11 +116,14 @@ OPENAI_API_KEY=your_openai_key
 # Asset Selection — a global switch, not two paths running at once.
 # Only one of crypto/stock is active per run; see "Switch to Stock Trading" below.
 ASSET_TYPE=crypto  # "crypto" or "stock"
-MARKET_SOURCE=binance  # "binance" or "tradingview"
+# MARKET_SOURCE default is asset-aware (binance for crypto, tradingview for
+# stock) if left unset — only set this explicitly to override that default,
+# e.g. MARKET_SOURCE=yfinance for the stock path's alternative live poller.
+MARKET_SOURCE=binance  # "binance", "tradingview", or "yfinance"
 
-# TradingView (only used when ASSET_TYPE=stock — Binance doesn't list equities)
-TRADINGVIEW_EXCHANGE=BINANCE  # BINANCE, NASDAQ, NYSE
-TRADINGVIEW_SCREENER=crypto   # crypto, america
+# TradingView (only used when MARKET_SOURCE=tradingview — Binance doesn't list equities)
+TRADINGVIEW_EXCHANGE=BINANCE  # BINANCE, NASDAQ, NYSE — asset-aware default if unset
+TRADINGVIEW_SCREENER=crypto   # crypto, america — asset-aware default if unset
 TRADINGVIEW_INTERVAL=1m        # 1m, 5m, 15m, 1h, 4h, 1d
 
 # Smart Money Concepts
@@ -146,7 +151,7 @@ python main.py
 2. Serve the dashboard at `http://localhost:8080`
 3. Fit the HMM regime model (60 days of data) — refits weekly
 4. Load/build the GNN model (per-asset-type checkpoint: `model_checkpoints/hgt_latest_{crypto,stock}.pt`)
-5. Start real-time data streams (Binance or TradingView) across all configured timeframes
+5. Start real-time data streams (Binance, TradingView, or yfinance — see `MARKET_SOURCE`) across all configured timeframes
 6. Run SMC/FVG analysis on every tick, feed the paper-trading ledger
 7. Run the LLM-consensus debate + testnet execution path every 60s (skipped while bear veto is active)
 
@@ -156,7 +161,7 @@ Dashboard shows:
 - **Entry Point Insight** — read-only spot vs. derivative recommendations (direction, entry zone, SL/TP, and a rough liquidation estimate) computed from live SMC/FVG signals, per symbol per timeframe layer
 - **Paper-trading stats** — balance, win rate, breakdown by market (spot/derivative) and by timeframe layer, plus any rejection reasons (fee-too-tight, correlation cap hit) so a filtered signal is never silently invisible
 - Equity curve and price-movement charts (persisted across restarts)
-- Real-time GNN signals, current regime (low-vol/normal/turbulent), bear-veto state
+- Real-time GNN signals, current regime (low-vol/turbulent), bear-veto state
 - **LLM-consensus decision history** (`consensus_decisions` in `/api/status`) — every P(Trade) evaluation from the debate path, executed or not, so its threshold can eventually be calibrated with real evidence instead of guesswork
 
 ### Historical backtesting
@@ -170,6 +175,14 @@ python backtest.py --slippage-sweep                     # finds the slippage lev
 ```
 
 All modes replay real historical candles (yfinance) through the same `entry_insight` pipeline the dashboard uses live, in true chronological lockstep across symbols — not one-symbol-fully-then-the-next, which would hide the portfolio correlation cap's real cross-symbol behavior. Results save to `backtrack_logs/backtest_ledger_*.json`, separate from the live paper ledger.
+
+**Related validation tooling** (all quantitative-only — none of these change live strategy code unless a result explicitly earns it):
+```bash
+python backtest_target_matrix.py --timeframe 15m       # target/exit variant comparison (gap 1.0-2.0x, fixed 2R/3R/5R) vs the live baseline, by expectancy + drawdown, not just win rate
+python hmm_regime_ab_experiment.py                      # 2-state vs 3-state HMM cluster quality + outcome relevance
+python hmm_windowed_decode_experiment.py                 # validates the rolling-window regime-decode fix against retrospective ground truth
+python hmm_regime_filter_backtest.py                     # regime-filtered Path 1 A/B (hard/soft filter vs baseline) — result: rejected, see TL;DR
+```
 
 ---
 
@@ -263,9 +276,10 @@ LEVERAGE = 1                # 1x (spot-equivalent)
 
 #### HMM Regime Detection
 ```python
-HMM_N_STATES = 3            # 0=low-vol, 1=normal, 2=high-stress-turbulent
-HMM_TURBULENT_STATE = 2
+HMM_N_STATES = 2            # 0=low-vol/calm, 1=high-stress-turbulent
+HMM_TURBULENT_STATE = 1
 HMM_RISK_REDUCTION = 0.70   # slash MAX_POSITION_PCT by 70% in turbulent regime
+HMM_DECODE_WINDOW_HOURS = 336  # rolling-window decode, not single-observation — see TL;DR
 ```
 
 ---
@@ -333,10 +347,18 @@ HMM_RISK_REDUCTION = 0.70   # slash MAX_POSITION_PCT by 70% in turbulent regime
 
 ### Switch to Stock Trading
 
-**Never actually tested end-to-end** — the infrastructure (seed tokens, separate GNN checkpoint, separate paper ledger) is all in place, but nobody has run it live yet. Steps:
+Now runs end-to-end (verified live: yfinance → backfill → SMC/FVG → GNN → `entry_insight` → paper ledger, zero errors, all 8 symbols across 5m/15m/1h) — but is still in its first observation window as of this writing, with no live sample yet to judge it by. Don't treat early results as validation; the discipline from the target-matrix experiment applies here too — expectancy/win-rate/drawdown/rejection-distribution over enough samples, not a quick look at balance.
+
+Two data-source options — `MARKET_SOURCE=yfinance` is the one actually validated live this session (TradingView's free tier rate-limits after ~1 poll cycle regardless of pacing):
 
 ```bash
-# Edit .env
+# Edit .env — recommended (yfinance)
+ASSET_TYPE=stock
+MARKET_SOURCE=yfinance
+```
+
+```bash
+# Edit .env — alternative (TradingView; may hit rate limits)
 ASSET_TYPE=stock
 MARKET_SOURCE=tradingview
 TRADINGVIEW_EXCHANGE=NASDAQ
@@ -348,6 +370,10 @@ TRADINGVIEW_INTERVAL=5m
 python train_gnn.py   # trains a SEPARATE checkpoint for stocks — must run before main.py, there is no pretrained stock model
 python main.py
 ```
+
+`ASSET_TYPE` is a global switch — crypto and stock don't run in the same process. To observe both at once (e.g. while validating stock), run two separate processes with different `DASHBOARD_PORT`s; each asset type already gets its own checkpoint, paper ledger, and HMM checkpoint file, so they don't collide.
+
+Note: `yfinance`-sourced live data is regular-session-only (no pre/post-market) — outside NASDAQ hours the poller idles by design, not a bug; see `ingestion/yfinance_stream.py`.
 
 ### Custom Watchlist
 
@@ -460,6 +486,10 @@ This is expected right now — see TL;DR. `TRADE_THRESHOLD=0.55` sits close to t
 TraderStuff/
 ├── main.py                    # Main orchestrator — runs both decision paths + dashboard
 ├── backtest.py                # Historical validation: is/oos, multi-regime, GNN ablation, multi-timeframe concurrency, slippage sweep
+├── backtest_target_matrix.py  # Target/exit variant comparison (Path 1 only) — result: live baseline already optimal
+├── hmm_regime_ab_experiment.py       # 2-state vs 3-state HMM cluster quality + outcome relevance
+├── hmm_windowed_decode_experiment.py # Validates the rolling-window regime-decode fix vs retrospective ground truth
+├── hmm_regime_filter_backtest.py     # Regime-filtered Path 1 A/B — result: rejected, not deployed
 ├── train_gnn.py                # GNN training from historical candles (separate checkpoint per ASSET_TYPE)
 ├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
 ├── config/
@@ -479,8 +509,9 @@ TraderStuff/
 │   └── continual_learning.py  # Path 1: GNN fine-tuning from realized paper-trade outcomes
 ├── ingestion/
 │   ├── structured_stream.py   # Binance WebSocket, multi-timeframe klines
-│   ├── tradingview_stream.py  # TradingView data (stock path)
-│   └── integrated_stream.py   # Unified stream + per-timeframe SMC
+│   ├── tradingview_stream.py  # TradingView data (stock path option)
+│   ├── yfinance_stream.py     # yfinance polling stream (stock path option, regular-session-only)
+│   └── integrated_stream.py   # Unified stream + per-timeframe SMC (binance/tradingview/yfinance)
 ├── gnn/
 │   ├── model.py               # HGTSignalModel (Heterogeneous Graph Transformer)
 │   ├── trainer.py             # Training + live/backtest inference
@@ -489,7 +520,7 @@ TraderStuff/
 │   ├── neo4j_client.py        # Neo4j operations
 │   └── schema.py              # Graph schema, seed tokens (crypto + stock)
 └── risk/
-    ├── hmm_regime.py          # HMM regime detector (feeds Path 2's circuit breaker only)
+    ├── hmm_regime.py          # HMM regime detector (feeds Path 2's circuit breaker only) — 2-state, rolling-window decode
     └── circuit_breaker.py     # Bear veto + risk reduction in turbulent regime
 ```
 
@@ -498,9 +529,10 @@ TraderStuff/
 ## 🤝 Contributing
 
 PRs welcome! Known gaps worth tackling, roughly in order of value:
-- Validate the stock/NASDAQ path end-to-end (never run live — see Advanced Usage)
+- Let the stock/NASDAQ path (now running live in observation mode — see Advanced Usage) accumulate enough real samples for a genuine Stage 4 comparison against the crypto baseline (expectancy/win-rate/drawdown/rejection-distribution, not raw P&L — different universe, hours, and opportunity count)
 - Calibrate `TRADE_THRESHOLD`/the P(Trade) formula for Path 2 once it has real outcome data to work from
 - Investigate whether GNN confluence can be made to add real value, or whether SMC/FVG alone is the more honest baseline (see `backtest.py --with-gnn`)
+- A genuinely bigger reward lever than target width — the target/exit matrix closed that door (wider targets are strictly worse); the more promising direction flagged by the regime-filter experiment is entry *selection* ("which trades should never have been taken"), not exit sizing
 - Local/self-hosted LLM option for Path 2's debate (feasible via an OpenAI-compatible local server; tradeoff is reasoning quality vs. removing the API dependency)
 - More data sources (Polygon.io, Alpaca)
 - Multi-exchange arbitrage
