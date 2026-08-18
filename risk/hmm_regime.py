@@ -1,6 +1,6 @@
 """
 Hidden Markov Model regime classifier.
-States: 0=LOW_VOLATILITY, 1=NORMAL, 2=HIGH_STRESS_TURBULENT
+States (settings.HMM_N_STATES): 0=LOW_VOLATILITY, 1=HIGH_STRESS_TURBULENT
 
 Features:
   - Benchmark 24h volatility (std of log returns)
@@ -24,15 +24,22 @@ ONLY for crypto — reusing it for stock would repeat the exact mismatch
 this file's benchmark fix (BTC vol used for stock regime) just corrected.
 Stock keeps the original 2-feature (vol, change) model.
 
-Also found live (user's own observation, not assumed): even with 3
-features, requesting 3 HMM states from vol+change alone tends to collapse
-2 of them into a near-identical "calm" cluster when the training window
-doesn't contain much genuine stress — confirmed empirically (180d window
-didn't fix it either). This has ZERO behavioral effect since
-circuit_breaker.py only ever checks state == HMM_TURBULENT_STATE (2);
-states 0 and 1 are treated identically. Adding Fear & Greed may or may not
-sharpen that separation — not verified either way, worth re-checking after
-a live refit.
+Also found live (user's own observation, not assumed): requesting 3 HMM
+states from vol+change alone consistently collapsed 2 of them into a
+near-identical "calm" cluster (~0.3% mean-vol separation, vs ~74-80%
+against the genuinely distinct turbulent state) — a real 2-regime
+process at this resolution, not 3. This had ZERO behavioral effect at the
+time (circuit_breaker.py only ever checked state == HMM_TURBULENT_STATE,
+and states 0/1 were treated identically either way), confirmed directly
+via an A/B: 2-state vs 3-state produce IDENTICAL turbulent/calm
+classification for every trade tested. HMM_N_STATES is now 2 — pure
+correctness/parsimony, not a behavior change (see
+hmm_regime_ab_experiment.py).
+
+detect_regime() decodes a rolling window of recent observations (see
+HMM_DECODE_WINDOW_HOURS), not a single point — feeding predict() one
+observation at a time let a peaked startprob_ dominate the decision
+regardless of the actual input; see hmm_windowed_decode_experiment.py.
 
 Fitted on recent hourly benchmark history; refitted weekly.
 """
