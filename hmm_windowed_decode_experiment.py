@@ -47,8 +47,8 @@ CANDIDATE_WINDOWS_HOURS = [72, 168, 336]  # 3d, 7d, 14d
 WALK_FORWARD_START_HOUR = 400  # skip enough that even the largest window is fully populated
 
 
-def fetch_features():
-    df = yf.download("BTC-USD", period=f"{FETCH_DAYS}d", interval="1h", progress=False, auto_adjust=True)
+def fetch_features(days: int = FETCH_DAYS):
+    df = yf.download("BTC-USD", period=f"{days}d", interval="1h", progress=False, auto_adjust=True)
     closes = df["Close"].dropna().values.flatten().tolist()
     timestamps = [ts.to_pydatetime().replace(tzinfo=None) for ts in df.index[: len(closes)]]
 
