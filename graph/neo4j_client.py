@@ -124,6 +124,56 @@ class Neo4jClient:
         rows = self.run_write(cypher, gamma=gamma)
         return rows[0]["updated"] if rows else 0
 
+    # ── Graph pruning (unbounded growth control) ───────────────────────────
+    #
+    # Macro_Event nodes have no cap or expiry otherwise: one new node per
+    # qualifying news article, forever (see knowledge/graph_populator.py),
+    # and apply_temporal_decay() above only ever weakens edges, never
+    # removes them — at the configured TEMPORAL_DECAY_GAMMA (0.001/day),
+    # decay alone is far too slow to matter (90 days only takes a 0.8
+    # confidence down to ~0.73). These two methods are the actual
+    # growth-control mechanism, meant to run on a slow (daily) schedule.
+
+    def prune_old_macro_events(self, max_age_days: int) -> int:
+        """
+        Deletes Macro_Event nodes (and all their relationships, via
+        DETACH DELETE) older than max_age_days. Uses
+        coalesce(created_at, recovered_at) since nodes restored via
+        forensic recovery (the 2026-08-19 Neo4j data-loss incident) have
+        no created_at — recovered_at is a fair substitute "born" timestamp
+        for pruning purposes, so recovered nodes aren't kept forever just
+        because their true origin is unknown. A node with neither property
+        is left alone (age unknown, not assumed stale).
+        """
+        cypher = """
+        MATCH (e:Macro_Event)
+        WHERE coalesce(e.created_at, e.recovered_at) < timestamp() - ($max_age_days * 86400000)
+        WITH collect(e) AS stale, count(e) AS n
+        FOREACH (e IN stale | DETACH DELETE e)
+        RETURN n AS deleted
+        """
+        rows = self.run_write(cypher, max_age_days=max_age_days)
+        return rows[0]["deleted"] if rows else 0
+
+    def prune_decayed_edges(self, min_confidence: float) -> int:
+        """
+        Drops relationships whose confidence_score has decayed (via
+        apply_temporal_decay) below min_confidence -- functionally dead
+        weight at that point, contributing negligible signal to anything
+        that reads confidence_score. Secondary cleanup; at the current
+        decay rate this rarely fires on its own (see module note above),
+        prune_old_macro_events is the primary growth-control lever.
+        """
+        cypher = """
+        MATCH ()-[r]->()
+        WHERE r.confidence_score IS NOT NULL AND r.confidence_score < $min_confidence
+        WITH collect(r) AS stale, count(r) AS n
+        FOREACH (r IN stale | DELETE r)
+        RETURN n AS deleted
+        """
+        rows = self.run_write(cypher, min_confidence=min_confidence)
+        return rows[0]["deleted"] if rows else 0
+
     # ── Node attribute updates (market data) ──────────────────────────────
 
     def update_token_market_data(self, symbol: str, **market_attrs) -> None:

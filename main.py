@@ -451,6 +451,21 @@ async def async_main() -> None:
     # Re-fit HMM weekly
     schedule.every().monday.at("01:00").do(regime_detector.fit, client=binance_client, days=90)
 
+    # Graph pruning — Macro_Event nodes have no cap/expiry otherwise (one
+    # new node per qualifying article, forever) and apply_temporal_decay()
+    # only ever weakens edges, never removes them. Daily is plenty; this is
+    # maintenance, not something that needs sub-day freshness.
+    def run_graph_pruning():
+        client = Neo4jClient.get()
+        try:
+            deleted_events = client.prune_old_macro_events(settings.GRAPH_MACRO_EVENT_MAX_AGE_DAYS)
+            deleted_edges = client.prune_decayed_edges(settings.GRAPH_MIN_EDGE_CONFIDENCE)
+            logger.info("Graph pruning: removed %d stale Macro_Event nodes, %d decayed edges", deleted_events, deleted_edges)
+        except Exception as exc:
+            logger.warning("Graph pruning failed: %s", exc)
+
+    schedule.every().day.at("00:30").do(run_graph_pruning)
+
     # Continual learning from realized paper-trade outcomes — fires every
     # LEARNING_INTERVAL_HOURS, no-ops if fewer than LEARNING_MIN_NEW_TRADES
     # have closed since the last update. See continual_learning.py docstring

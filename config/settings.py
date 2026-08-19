@@ -104,6 +104,17 @@ HMM_DECODE_WINDOW_HOURS = 336
 # ── Temporal graph decay ──────────────────────────────────────────────────
 TEMPORAL_DECAY_GAMMA = 0.001  # γ: edge weight decay per day
 
+# At this gamma, decay alone is too slow to bound growth in practice — 90
+# days only knocks a starting confidence of 0.8 down to ~0.73
+# (exp(-0.001*90) ≈ 0.914), nowhere near GRAPH_MIN_EDGE_CONFIDENCE. The
+# real growth-control lever is age-based deletion: Macro_Event nodes have
+# no cap or expiry otherwise (confirmed — one new node per qualifying
+# article, forever), and their IMPACTS edges grow right alongside them.
+# Runs as a scheduled daily job (see main.py), not on every tick — this is
+# maintenance, not something that needs sub-day freshness.
+GRAPH_MACRO_EVENT_MAX_AGE_DAYS = 90   # delete Macro_Event nodes (+ their edges) older than this
+GRAPH_MIN_EDGE_CONFIDENCE = 0.05      # secondary cleanup: drop any edge decayed below this floor
+
 # ── RSS news feeds (crypto) ────────────────────────────────────────────────
 RSS_FEEDS = [
     "https://feeds.feedburner.com/CoinDesk",
