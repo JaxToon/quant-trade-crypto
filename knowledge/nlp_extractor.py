@@ -74,9 +74,19 @@ class ExtractionResult:
 # ── Regex patterns for crypto-specific entities ───────────────────────────
 
 CRYPTO_TICKER_RE = re.compile(r"\$([A-Z]{2,6})\b")
+# Was missing cardano/ada, avalanche/avax entirely (and polkadot, though
+# "dot" is deliberately NOT added bare here -- too common an English word/
+# punctuation mark, would flood entity detection with false positives;
+# "polkadot" the full name is enough to catch real mentions, same
+# precision tradeoff the existing short tickers like "sol"/"eth" already
+# accept). Found while reconstructing Macro_Event edges after a Neo4j
+# data-loss incident: entity_resolver.py's alias map alone wasn't enough
+# fixed there too — a mention has to be DETECTED here first before
+# resolve_entity() ever gets a chance to map it to a symbol.
 CRYPTO_KEYWORDS = {
     "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "bnb",
     "xrp", "ripple", "defi", "nft", "stablecoin", "usdt", "usdc",
+    "cardano", "ada", "avalanche", "avax", "polkadot",
 }
 
 # Simple heuristic: if two entities appear in the same sentence, check verb cues
