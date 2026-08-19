@@ -142,6 +142,7 @@ class PaperTradingLedger:
 
     def maybe_open(
         self, symbol: str, market: str, rec: dict, timeframe: str = "5m", opened_at: str | None = None,
+        current_price: float | None = None,
     ) -> str | None:
         """
         rec: a `spot` or `derivative` block from entry_insight.build_entry_insight.
@@ -156,6 +157,20 @@ class PaperTradingLedger:
         positions (found via exactly that: an overlap analysis that should
         have found concurrent positions found none, because every "opened_at"
         was hours in the future relative to its own "closed_at").
+
+        current_price: live market price at call time, if known — passed by
+        main.py, omitted by backtests (which replay entry_zone/stop_loss as
+        the historical fill and reconcile against price via the separate
+        check_and_close_ohlc path). Used only to reject a setup that has
+        already been invalidated by price before it could ever actually
+        fill: entry_insight recommends off the SMC/FVG order-block zone
+        without checking whether current price has already moved through
+        its own stop or target, so a stale-but-still-"actionable" signal
+        (an order block that price already broke through) would otherwise
+        open and get closed on the very next check_and_close call a moment
+        later — always as a loss, since the fill price was never actually
+        reachable. Found live: NVDA re-opened and instantly stopped out on
+        the same entry/SL/TP three times in ~25 minutes on 2026-08-19.
 
         Returns None if a position was opened, or if there was nothing to do
         (no signal, already open). Returns a short human-readable reason if
@@ -178,6 +193,17 @@ class PaperTradingLedger:
         if self.slippage_pct:
             # Adverse fill: pay more to get long, receive less to get short.
             entry_price *= (1 + self.slippage_pct) if direction == "long" else (1 - self.slippage_pct)
+
+        if current_price is not None:
+            already_stopped = current_price <= stop_loss if direction == "long" else current_price >= stop_loss
+            already_hit_target = current_price >= target if direction == "long" else current_price <= target
+            if already_stopped or already_hit_target:
+                reason = (
+                    f"Setup sudah invalid — harga saat ini ({current_price:.6f}) sudah melewati "
+                    f"{'stop-loss' if already_stopped else 'target'} sebelum posisi sempat dibuka"
+                )
+                logger.debug("%s %s: %s", symbol, market, reason)
+                return reason
 
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < entry_price * MIN_STOP_DISTANCE_PCT:

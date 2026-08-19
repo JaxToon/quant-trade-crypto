@@ -76,6 +76,49 @@ def test_duplicate_open_is_a_noop(ledger):
     assert ledger.open_positions[("BTCUSDT", "spot", "1h")].quantity == original_qty
 
 
+def test_rejects_long_setup_already_through_its_own_stop(ledger):
+    """Live bug (2026-08-19): entry_insight recommends off the SMC/FVG
+    order-block zone without checking current price, so a stale-but-still-
+    "actionable" signal (price already broke through the order block) would
+    open and then get instantly stopped out by the very next check_and_close
+    — always a loss, since the fill price was never actually reachable.
+    NVDA hit this three times in ~25 minutes before the guard was added."""
+    rec = _rec(direction="long", confidence=78.0, entry_zone=(219.084999, 219.084999),
+                stop_loss=217.524002, target=221.314995)
+    reason = ledger.maybe_open("NVDA", "spot", rec, timeframe="1h", current_price=217.524002)
+    assert reason is not None
+    assert "invalid" in reason.lower()
+    assert ("NVDA", "spot", "1h") not in ledger.open_positions
+
+
+def test_rejects_short_setup_already_through_its_own_stop(ledger):
+    rec = _rec(direction="short", confidence=78.0, entry_zone=(100.0, 100.0),
+                stop_loss=105.0, target=90.0)
+    reason = ledger.maybe_open("NVDA", "derivative", rec, timeframe="1h", current_price=105.0)
+    assert reason is not None
+    assert ("NVDA", "derivative", "1h") not in ledger.open_positions
+
+
+def test_still_opens_normally_when_current_price_is_between_entry_and_stop(ledger):
+    """The guard must only reject already-invalidated setups, not ordinary
+    entries where price has moved a little but hasn't reached the stop."""
+    rec = _rec(direction="long", confidence=50.0, entry_zone=(100.0, 100.0),
+                stop_loss=95.0, target=110.0)
+    reason = ledger.maybe_open("BTCUSDT", "spot", rec, timeframe="1h", current_price=98.0)
+    assert reason is None
+    assert ("BTCUSDT", "spot", "1h") in ledger.open_positions
+
+
+def test_current_price_omitted_preserves_old_behavior(ledger):
+    """Backtests never pass current_price — must behave exactly as before
+    (no new rejection path activates when it's None)."""
+    rec = _rec(direction="long", confidence=50.0, entry_zone=(100.0, 100.0),
+                stop_loss=95.0, target=110.0)
+    reason = ledger.maybe_open("BTCUSDT", "spot", rec, timeframe="1h")
+    assert reason is None
+    assert ("BTCUSDT", "spot", "1h") in ledger.open_positions
+
+
 def test_correlated_positions_can_trip_the_portfolio_cap(ledger):
     """BTCUSDT/ETHUSDT are correlated at 0.856 (well above the 0.5
     threshold) in strategy/correlation.py. Two max-confidence spot
