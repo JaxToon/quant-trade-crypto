@@ -232,8 +232,17 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
             # derivative sub-blocks — carry it along so the ledger records it.
             spot = {**ins.get("spot", {}), "confidence": ins.get("confidence", 0.0)}
             derivative = {**ins.get("derivative", {}), "confidence": ins.get("confidence", 0.0)}
-            spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot, timeframe=tf)
-            deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf)
+            # Use the SAME cross-timeframe price check_and_close will use
+            # below, not ins["price"] — that's the signal's OWN timeframe's
+            # last candle price (e.g. a 1h layer's price only updates once
+            # an hour), which can already be stale relative to the live
+            # price check_and_close checks moments later. Comparing the
+            # stale price against itself always passes, defeating the guard
+            # entirely (confirmed live: NVDA still re-opened/instant-closed
+            # after the current_price guard was first deployed).
+            current_price = prices.get(symbol)
+            spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot, timeframe=tf, current_price=current_price)
+            deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf, current_price=current_price)
             if spot_reason or deriv_reason:
                 rejections[insight_key] = {"spot": spot_reason, "derivative": deriv_reason}
 
