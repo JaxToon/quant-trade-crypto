@@ -11,11 +11,14 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 - **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap. A separate target/exit backtest matrix (`backtest_target_matrix.py`) confirmed the live FVG-gap-based target is already the best of 7 tested variants at 5m/15m on expectancy *and* drawdown — wider targets (1-2x the gap, or fixed 2R/3R/5R) are strictly worse, monotonically, the wider they get.
 - **What's not yet proven:**
   - **GNN's contribution is measured as negligible** in a properly controlled ablation (SMC-only vs SMC+GNN: identical win rate, identical trade count, on real data).
-  - **The stock/NASDAQ path now runs end-to-end** (yfinance → `IntegratedMarketStream` → SMC/FVG → GNN → `entry_insight` → paper ledger, verified live with real backfilled data and zero errors) but is still in its first observation window — no live samples yet to judge it by. See "Switch to Stock Trading" below.
+  - **The stock/NASDAQ path now runs end-to-end and has its first real live samples**: 4 closed trades (75% win rate, +12.3% on the $10k paper balance) plus 5 open as of this writing — still far too small to judge, but no longer a zero-sample path. See "Switch to Stock Trading" below.
   - **The LLM-consensus/testnet path's decision quality is unaudited** — it has literally never closed a trade, and its execute threshold appears very hard to reach given the formula's own math (see `TRADE_THRESHOLD` in Configuration below).
-  - **Live paper-trading sample size is still small** — treat the backtested numbers as evidence, not proof; the live ledger needs weeks more real time to accumulate before its own win rate means much.
+  - **Live paper-trading sample size is still small** — crypto has 20 closed trades (70% win rate, +28.6%), stock has 4; treat both live figures and any per-timeframe/per-market breakdown as directional, not statistically meaningful yet — 1-8 trades per bucket is noise, not signal.
   - **A regime-based entry filter for Path 1 was tested and rejected**: skipping trades while the HMM benchmark reads "turbulent" made expectancy and win rate *worse* at 5m/15m, and even where it looked better at 1h, drawdown got worse. See `hmm_regime_filter_backtest.py` — not deployed, kept only as documented negative evidence.
-- **A real regime-detection bug was found and fixed this session**: `detect_regime()` classified one observation at a time, which for a length-1 HMM sequence is dominated by the model's learned `startprob_` almost regardless of input — verified directly against the deployed checkpoint that the bear-veto circuit breaker had likely never fired from real market conditions (0.00% turbulent flagged across a 60+ day walk-forward test). Fixed via a rolling-window decode; see `risk/hmm_regime.py` and `hmm_windowed_decode_experiment.py`.
+  - **SMC confidence-weighting (respect-count / ATR-relative bonuses) was tested and not deployed**: mixed result, one variant only won at a single timeframe (the same "not enough" bar the target-matrix experiment already established). See `smc_confidence_matrix_backtest.py`.
+- **A real regime-detection bug was found and fixed in an earlier session**: `detect_regime()` classified one observation at a time, which for a length-1 HMM sequence is dominated by the model's learned `startprob_` almost regardless of input — verified directly against the deployed checkpoint that the bear-veto circuit breaker had likely never fired from real market conditions (0.00% turbulent flagged across a 60+ day walk-forward test). Fixed via a rolling-window decode; see `risk/hmm_regime.py` and `hmm_windowed_decode_experiment.py`.
+- **A real paper-trading bug was found live and fixed this session**: `entry_insight` recommends off the SMC/FVG order-block zone without checking current price, so a stale-but-still-"actionable" signal (price already broke through the zone) kept re-firing the same entry/SL/TP after it was no longer reachable — the ledger would open at the zone price and get instantly stopped out on the very next check, always a loss. Hit live: the stock ledger lost ~28% in 30 minutes to phantom NVDA trades before being caught. Fixed via a `current_price` guard in `maybe_open()` that rejects a setup already past its own stop/target; see `backtrack/paper_trading.py`.
+- **A real Neo4j crash was found and fixed**: starting crypto and stock at once raced on `CREATE INDEX/CONSTRAINT ... IF NOT EXISTS`, which only protects single-call idempotency, not true concurrent creation from two separate processes — one process would crash with `EquivalentSchemaRuleAlreadyExists`. Fixed in `graph/schema.py`; running both asset types concurrently (see "Switch to Stock Trading" below) is now verified safe, including through a multi-hour unattended overnight run.
 - **Where to look next:** `DEPLOYMENT.md` for persistence/cloud-deployment notes, `python backtest.py --help`-style flags below for validation tooling, `dashboard/consensus_history.json` (via `/api/status`) for the LLM-consensus path's live decision history.
 
 ---
@@ -26,7 +29,7 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 - **Graph Neural Network (GNN)** — Heterogeneous Graph Transformer (`gnn/model.py: HGTSignalModel`) for price-signal prediction over the knowledge graph
 - **Multi-Agent LLM Consensus** (Bull, Bear, Critic agents) for the separate testnet-execution path
 - **HMM Regime Detection** with a circuit breaker (bear veto + risk cut in turbulent regime) — feeds the LLM-consensus path only. 2-state (low-vol/turbulent) as of this writing — was 3-state, but the middle "normal" state was consistently near-identical to "low-vol" (~0.3% mean-vol separation vs ~74-80% against the genuinely distinct turbulent state), a real 2-regime process at this resolution, not 3. Confirmed via A/B that this changes nothing behaviorally. Decodes a rolling window of recent observations rather than one point at a time — see the bug note in the TL;DR.
-- **Neo4j Knowledge Graph** for token/protocol relationships and news-derived edges
+- **Neo4j Knowledge Graph** for token/protocol relationships and news-derived edges. Entity resolution/keyword detection covers the full 16-symbol watchlist (crypto + stock) — previously only 5 of 16 had alias coverage, a silent gap in what NLP extraction could even recognize. Bounded growth: `Macro_Event` nodes (one per qualifying news article, otherwise unbounded) are pruned past `GRAPH_MACRO_EVENT_MAX_AGE_DAYS` and decayed edges below `GRAPH_MIN_EDGE_CONFIDENCE` are dropped, on a daily scheduled job — temporal decay alone (see Continual Learning below) is far too slow to functionally prune anything on its own
 - **Continual Learning** — two independent loops: contrastive fine-tuning from realized paper-trade outcomes (`backtrack/continual_learning.py`), and nightly post-mortem causal discovery from real testnet losses (`backtrack/post_mortem.py`, dormant until the LLM-consensus path actually closes a trade)
 
 ### Smart Money Concepts (SMC)
@@ -48,6 +51,7 @@ Imbalance/inefficiency detection:
 ### $10k Virtual Paper-Trading Ledger
 - Fixed-fractional risk sizing (2%–5% of starting balance per trade, scaled by signal confidence), sized off *starting* balance to avoid compounding drift
 - Fee-aware stop-distance filtering — rejects setups too tight to survive round-trip fees
+- **Already-invalidated-setup guard** — rejects opening a position whose current live price has already crossed its own stop or target, so a stale signal can't open a trade that's mathematically already lost (see the phantom-trade bug note in the TL;DR)
 - **Portfolio-level correlated-risk cap** — caps aggregate correlation-weighted exposure across open positions at 8% of starting balance, so several correlated bets can't silently stack into one oversized bet
 - Persists across restarts (`backtrack_logs/paper_ledger_{crypto,stock}.json`)
 
@@ -182,6 +186,7 @@ python backtest_target_matrix.py --timeframe 15m       # target/exit variant com
 python hmm_regime_ab_experiment.py                      # 2-state vs 3-state HMM cluster quality + outcome relevance
 python hmm_windowed_decode_experiment.py                 # validates the rolling-window regime-decode fix against retrospective ground truth
 python hmm_regime_filter_backtest.py                     # regime-filtered Path 1 A/B (hard/soft filter vs baseline) — result: rejected, see TL;DR
+python smc_confidence_matrix_backtest.py                 # respect-count / ATR-relative confidence bonuses vs baseline — result: mixed, not deployed, see TL;DR
 ```
 
 ---
@@ -347,7 +352,7 @@ HMM_DECODE_WINDOW_HOURS = 336  # rolling-window decode, not single-observation �
 
 ### Switch to Stock Trading
 
-Now runs end-to-end (verified live: yfinance → backfill → SMC/FVG → GNN → `entry_insight` → paper ledger, zero errors, all 8 symbols across 5m/15m/1h) — but is still in its first observation window as of this writing, with no live sample yet to judge it by. Don't treat early results as validation; the discipline from the target-matrix experiment applies here too — expectancy/win-rate/drawdown/rejection-distribution over enough samples, not a quick look at balance.
+Runs end-to-end (yfinance → backfill → SMC/FVG → GNN → `entry_insight` → paper ledger, all 8 symbols across 5m/15m/1h) and now has its first real live trades (4 closed, 5 open as of this writing) — still far too small a sample to judge. Don't treat early results as validation; the discipline from the target-matrix experiment applies here too — expectancy/win-rate/drawdown/rejection-distribution over enough samples, not a quick look at balance.
 
 Two data-source options — `MARKET_SOURCE=yfinance` is the one actually validated live this session (TradingView's free tier rate-limits after ~1 poll cycle regardless of pacing):
 
@@ -371,9 +376,14 @@ python train_gnn.py   # trains a SEPARATE checkpoint for stocks — must run bef
 python main.py
 ```
 
-`ASSET_TYPE` is a global switch — crypto and stock don't run in the same process. To observe both at once (e.g. while validating stock), run two separate processes with different `DASHBOARD_PORT`s; each asset type already gets its own checkpoint, paper ledger, and HMM checkpoint file, so they don't collide.
+`ASSET_TYPE` is a global switch — crypto and stock don't run in the same process. To observe both at once (e.g. while validating stock), run two separate processes — `DASHBOARD_PORT` now defaults asset-aware (8080 crypto / 8081 stock) so you don't need to set it explicitly unless you want a different port; each asset type already gets its own checkpoint, paper ledger, and HMM checkpoint file, so they don't collide. Starting both at once used to be able to crash on a Neo4j schema-init race — fixed (see TL;DR) and verified safe through a multi-hour concurrent run.
 
-Note: `yfinance`-sourced live data is regular-session-only (no pre/post-market) — outside NASDAQ hours the poller idles by design, not a bug; see `ingestion/yfinance_stream.py`.
+Example second-process launch (stock, alongside a crypto process already running on the defaults):
+```bash
+ASSET_TYPE=stock MARKET_SOURCE=yfinance python -u main.py
+```
+
+Note: `yfinance`-sourced live data is regular-session-only (no pre/post-market — NASDAQ hours are 9:30–16:00 ET) — outside that window the poller idles by design, and open positions simply sit unchanged (no fresh price ticks to check them against) until the next session opens. Not a bug if you check in and nothing's moved; see `ingestion/yfinance_stream.py`.
 
 ### Custom Watchlist
 
@@ -490,6 +500,7 @@ TraderStuff/
 ├── hmm_regime_ab_experiment.py       # 2-state vs 3-state HMM cluster quality + outcome relevance
 ├── hmm_windowed_decode_experiment.py # Validates the rolling-window regime-decode fix vs retrospective ground truth
 ├── hmm_regime_filter_backtest.py     # Regime-filtered Path 1 A/B — result: rejected, not deployed
+├── smc_confidence_matrix_backtest.py # SMC confidence-weighting bonuses — result: mixed, not deployed
 ├── train_gnn.py                # GNN training from historical candles (separate checkpoint per ASSET_TYPE)
 ├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
 ├── config/
@@ -517,8 +528,8 @@ TraderStuff/
 │   ├── trainer.py             # Training + live/backtest inference
 │   └── dataset.py             # Graph dataset builder from Neo4j
 ├── graph/
-│   ├── neo4j_client.py        # Neo4j operations
-│   └── schema.py              # Graph schema, seed tokens (crypto + stock)
+│   ├── neo4j_client.py        # Neo4j operations, incl. daily Macro_Event/edge pruning (bounded graph growth)
+│   └── schema.py              # Graph schema, seed tokens (crypto + stock) — concurrent-start-safe (see TL;DR)
 └── risk/
     ├── hmm_regime.py          # HMM regime detector (feeds Path 2's circuit breaker only) — 2-state, rolling-window decode
     └── circuit_breaker.py     # Bear veto + risk reduction in turbulent regime
