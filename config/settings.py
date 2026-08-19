@@ -193,7 +193,14 @@ ENTRY_INSIGHT_MIN_CONFIDENCE = 15.0
 
 # ── Dashboard (embedded directly in main.py — single command to run both) ──
 DASHBOARD_ENABLED = os.getenv("DASHBOARD_ENABLED", "true").lower() == "true"
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8080"))
+# Asset-type-conditional default so a crypto+stock restart never collides
+# on 8080 by omission — found live (2026-08-19): restarting just the stock
+# process to deploy a fix and forgetting to pass DASHBOARD_PORT explicitly
+# silently knocked its dashboard offline for ~90s (bind conflict with the
+# crypto process already on 8080), while the trading loop itself kept
+# running fine in the background thread. Explicit DASHBOARD_PORT still
+# wins when set — this only changes what happens when it's omitted.
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8081" if ASSET_TYPE == "stock" else "8080"))
 
 # ── Paper trading (scores entry_insight recommendations, no real orders) ──
 PAPER_TRADING_ENABLED = os.getenv("PAPER_TRADING_ENABLED", "true").lower() == "true"
