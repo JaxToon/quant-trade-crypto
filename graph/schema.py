@@ -2,7 +2,13 @@
 Run once to create Neo4j constraints and indexes.
 Call: from graph.schema import initialize_schema; initialize_schema()
 """
+import logging
+
+from neo4j.exceptions import ClientError
+
 from graph.neo4j_client import Neo4jClient
+
+logger = logging.getLogger(__name__)
 
 CONSTRAINTS = [
     "CREATE CONSTRAINT token_symbol IF NOT EXISTS FOR (t:Token) REQUIRE t.symbol IS UNIQUE",
@@ -81,16 +87,39 @@ SEED_EDGES = [
 ]
 
 
+def _run_schema_statement(client: Neo4jClient, stmt: str) -> None:
+    """
+    Every statement here already says IF NOT EXISTS, but that only makes a
+    single call idempotent — it doesn't protect against two separate
+    processes both starting up at once (e.g. running crypto and stock
+    concurrently, exactly as the README's "run two separate processes"
+    pattern suggests). Both check "does this exist yet" before either has
+    committed, both proceed to create it, and the loser gets a real
+    EquivalentSchemaRuleAlreadyExists ClientError — which used to be
+    unhandled and crashed the whole process at startup. Confirmed live:
+    starting crypto and stock ~10s apart reliably reproduced this.
+    Benign by construction (the schema object the loser wanted now exists,
+    created by the winner) — log and move on rather than fail startup.
+    """
+    try:
+        client.run_write(stmt)
+    except ClientError as exc:
+        if "AlreadyExists" in (exc.code or ""):
+            logger.info("Schema statement already applied by a concurrent process, skipping: %s", stmt)
+        else:
+            raise
+
+
 def initialize_schema() -> None:
     client = Neo4jClient.get()
 
     print("Creating constraints...")
     for stmt in CONSTRAINTS:
-        client.run_write(stmt)
+        _run_schema_statement(client, stmt)
 
     print("Creating indexes...")
     for stmt in INDEXES:
-        client.run_write(stmt)
+        _run_schema_statement(client, stmt)
 
     print("Seeding base token nodes...")
     for symbol, name, asset_type in SEED_TOKENS:
