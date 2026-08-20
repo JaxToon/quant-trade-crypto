@@ -138,16 +138,29 @@ class Neo4jClient:
         """
         Deletes Macro_Event nodes (and all their relationships, via
         DETACH DELETE) older than max_age_days. Uses
-        coalesce(created_at, recovered_at) since nodes restored via
-        forensic recovery (the 2026-08-19 Neo4j data-loss incident) have
-        no created_at — recovered_at is a fair substitute "born" timestamp
-        for pruning purposes, so recovered nodes aren't kept forever just
-        because their true origin is unknown. A node with neither property
-        is left alone (age unknown, not assumed stale).
+        coalesce(created_at, recovered_at.epochMillis) since nodes restored
+        via forensic recovery (the 2026-08-19 Neo4j data-loss incident)
+        have no created_at — recovered_at is a fair substitute "born"
+        timestamp for pruning purposes, so recovered nodes aren't kept
+        forever just because their true origin is unknown. A node with
+        neither property is left alone (age unknown, not assumed stale).
+
+        The .epochMillis is load-bearing, not decorative: created_at is
+        stored as a plain epoch-millis INTEGER (via timestamp()), but
+        recovered_at was written as a native Neo4j ZONED DATETIME by the
+        forensic reconstruction script. Cypher's `<` on an INTEGER vs a
+        DATETIME returns NULL (silently excluded from WHERE) rather than
+        raising -- found live: coalesce(created_at, recovered_at) matched
+        exactly the 113 nodes with created_at and NONE of the 273
+        recovered nodes, even at max_age_days=0, making recovered nodes
+        silently un-prunable forever -- the exact opposite of this
+        method's documented intent. .epochMillis normalizes recovered_at
+        to the same INTEGER type before compare.
         """
         cypher = """
         MATCH (e:Macro_Event)
-        WHERE coalesce(e.created_at, e.recovered_at) < timestamp() - ($max_age_days * 86400000)
+        WITH e, coalesce(e.created_at, e.recovered_at.epochMillis) AS born_at_millis
+        WHERE born_at_millis < timestamp() - ($max_age_days * 86400000)
         WITH collect(e) AS stale, count(e) AS n
         FOREACH (e IN stale | DETACH DELETE e)
         RETURN n AS deleted
