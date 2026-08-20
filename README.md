@@ -172,6 +172,13 @@ python main.py
 
 Set `DASHBOARD_ENABLED=false` in `.env` to skip the embedded dashboard, or run it standalone in its own terminal with `python run_dashboard.py`.
 
+**Running both crypto and stock together:** `python main.py` alone only starts one asset type (`ASSET_TYPE` is a global switch — see "Switch to Stock Trading" below). To run both at once, use:
+```bash
+bash start_system.sh   # launches crypto (default env) + stock (ASSET_TYPE=stock MARKET_SOURCE=yfinance), backgrounded
+bash stop_system.sh    # gracefully stops both (SIGTERM, waits for the ledger to save), reports final balances
+```
+`start_system.sh` refuses to double-launch if either process is already running, and runs `reconcile_downtime.py` first — so a position that genuinely hit its SL/TP while the system was down gets closed for real before live monitoring resumes, rather than sitting stale. See "Reconciling the paper ledger after downtime" in Troubleshooting below for what that does on its own.
+
 Dashboard shows:
 - **Entry Point Insight** — read-only spot vs. derivative recommendations (direction, entry zone, SL/TP, and a rough liquidation estimate) computed from live SMC/FVG signals, per symbol per timeframe layer
 - **Paper-trading stats** — balance, win rate, breakdown by market (spot/derivative) and by timeframe layer, plus any rejection reasons (fee-too-tight, correlation cap hit) so a filtered signal is never silently invisible
