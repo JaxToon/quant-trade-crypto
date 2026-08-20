@@ -1,0 +1,6 @@
+# Shell scripts must keep LF line endings regardless of the platform's
+# core.autocrlf setting -- CRLF breaks bash (every line effectively ends
+# in a literal \r, e.g. "$'\r': command not found"). Without this, a
+# Windows checkout with core.autocrlf=true would silently corrupt
+# start_system.sh/stop_system.sh on first commit.
+*.sh text eol=lf
