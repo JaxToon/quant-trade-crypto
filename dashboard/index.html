@@ -228,10 +228,19 @@
   .no-data { color: var(--text-dim); font-size: 12px; text-align: center; padding: 20px 0; }
 
   /* ── Trades ── */
+  #trade-area {
+    max-height: 320px;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+  }
+  #trade-area::-webkit-scrollbar { width: 4px; }
+  #trade-area::-webkit-scrollbar-track { background: transparent; }
+  #trade-area::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
   .trade-table { width: 100%; border-collapse: collapse; }
   .trade-table th {
     font-size: 10px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase;
     color: var(--text-dim); padding: 0 0 8px; text-align: left;
+    position: sticky; top: 0; background: var(--bg-base);
   }
   .trade-table td {
     font-size: 12px; font-family: 'JetBrains Mono', monospace;
