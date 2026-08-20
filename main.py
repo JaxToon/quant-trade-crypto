@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -39,7 +40,16 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("trader.log", encoding="utf-8"),
+        # trader.log accumulates across restarts by design (README) for
+        # "what happened since the system started" -- but a plain
+        # FileHandler here meant genuinely unbounded growth for a system
+        # meant to run for weeks/months (found at 30MB after ~1 week of
+        # intermittent runtime). Rotates at 50MB, keeps 5 backups (~250MB
+        # ceiling) -- same "found unbounded growth, added a bound" fix
+        # already applied to the Macro_Event graph earlier this session.
+        logging.handlers.RotatingFileHandler(
+            "trader.log", maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        ),
     ],
 )
 logger = logging.getLogger("main")
