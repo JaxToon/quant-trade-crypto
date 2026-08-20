@@ -7,7 +7,7 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 - **Run it:** `python main.py` — one command starts everything (data streams, GNN, SMC/FVG analysis, dashboard at `http://localhost:8080`). Requires Neo4j running first.
 - **No real money at risk right now.** There are two separate decision paths, both simulated:
   1. **SMC/FVG entry-insight + $10k virtual paper-trading ledger** — read-only dashboard recommendations, scored against live price with a fixed-risk simulated account. This is the path with real backtested evidence behind it.
-  2. **Multi-agent LLM consensus (Bull/Bear/Critic) + Binance testnet orders** — a separate, independent path (`strategy/agents.py` → `consensus.py` → `execution.py`). Places real orders, but only on Binance's testnet (fake funds).
+  2. **Multi-agent LLM consensus (Bull/Bear/Critic) + Binance testnet orders** — a separate, independent path (`strategy/agents.py` → `consensus.py` → `execution.py`). Places real orders, but only on Binance's testnet (fake funds). **If this path is ever pointed at a real account:** it already places real, exchange-side `STOP_LOSS_LIMIT`/`TAKE_PROFIT_LIMIT` orders (GTC) at entry time — protection lives on Binance's own matching engine, not in this process, so a laptop shutdown does not leave a position unprotected. Position state also persists to disk across restarts. Unexercised in practice, though — it has never actually closed a real trade, even on testnet (see below).
 - **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap. A separate target/exit backtest matrix (`backtest_target_matrix.py`) confirmed the live FVG-gap-based target is already the best of 7 tested variants at 5m/15m on expectancy *and* drawdown — wider targets (1-2x the gap, or fixed 2R/3R/5R) are strictly worse, monotonically, the wider they get.
 - **What's not yet proven:**
   - **GNN's contribution is measured as negligible** in a properly controlled ablation (SMC-only vs SMC+GNN: identical win rate, identical trade count, on real data).
@@ -16,6 +16,7 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
   - **Live paper-trading sample size is still small** — crypto has 20 closed trades (70% win rate, +28.6%), stock has 4; treat both live figures and any per-timeframe/per-market breakdown as directional, not statistically meaningful yet — 1-8 trades per bucket is noise, not signal.
   - **A regime-based entry filter for Path 1 was tested and rejected**: skipping trades while the HMM benchmark reads "turbulent" made expectancy and win rate *worse* at 5m/15m, and even where it looked better at 1h, drawdown got worse. See `hmm_regime_filter_backtest.py` — not deployed, kept only as documented negative evidence.
   - **SMC confidence-weighting (respect-count / ATR-relative bonuses) was tested and not deployed**: mixed result, one variant only won at a single timeframe (the same "not enough" bar the target-matrix experiment already established). See `smc_confidence_matrix_backtest.py`.
+  - **A stop-loss placement matrix was tested — one clear rejection, one inconclusive result**: ATR-based stops (volatility-relative, replacing the live FVG-anchored buffer entirely) are decisively rejected — negative expectancy and negative return in all 9 variant×timeframe combinations tested, drawdown ballooning to 100–234% at wider multiples. Wider FVG-anchored stops (same method, bigger buffer) are mixed — better win rate and trade count everywhere, but only won on expectancy at 5m, not 15m/1h. Neither deployed. See `backtest_stoploss_matrix.py`.
 - **A real regime-detection bug was found and fixed in an earlier session**: `detect_regime()` classified one observation at a time, which for a length-1 HMM sequence is dominated by the model's learned `startprob_` almost regardless of input — verified directly against the deployed checkpoint that the bear-veto circuit breaker had likely never fired from real market conditions (0.00% turbulent flagged across a 60+ day walk-forward test). Fixed via a rolling-window decode; see `risk/hmm_regime.py` and `hmm_windowed_decode_experiment.py`.
 - **A real paper-trading bug was found live and fixed this session**: `entry_insight` recommends off the SMC/FVG order-block zone without checking current price, so a stale-but-still-"actionable" signal (price already broke through the zone) kept re-firing the same entry/SL/TP after it was no longer reachable — the ledger would open at the zone price and get instantly stopped out on the very next check, always a loss. Hit live: the stock ledger lost ~28% in 30 minutes to phantom NVDA trades before being caught. Fixed via a `current_price` guard in `maybe_open()` that rejects a setup already past its own stop/target; see `backtrack/paper_trading.py`.
 - **A real Neo4j crash was found and fixed**: starting crypto and stock at once raced on `CREATE INDEX/CONSTRAINT ... IF NOT EXISTS`, which only protects single-call idempotency, not true concurrent creation from two separate processes — one process would crash with `EquivalentSchemaRuleAlreadyExists`. Fixed in `graph/schema.py`; running both asset types concurrently (see "Switch to Stock Trading" below) is now verified safe, including through a multi-hour unattended overnight run.
@@ -187,6 +188,7 @@ python hmm_regime_ab_experiment.py                      # 2-state vs 3-state HMM
 python hmm_windowed_decode_experiment.py                 # validates the rolling-window regime-decode fix against retrospective ground truth
 python hmm_regime_filter_backtest.py                     # regime-filtered Path 1 A/B (hard/soft filter vs baseline) — result: rejected, see TL;DR
 python smc_confidence_matrix_backtest.py                 # respect-count / ATR-relative confidence bonuses vs baseline — result: mixed, not deployed, see TL;DR
+python backtest_stoploss_matrix.py --timeframe 15m       # stop-loss placement variants (wider FVG-anchored, ATR-based) vs baseline — ATR rejected, gap mixed, see TL;DR
 ```
 
 ---
@@ -485,6 +487,9 @@ LLM agents are cached for 5 minutes. If hitting limits:
 - Lower thresholds: `FVG_MIN_GAP_PERCENT = 0.05`
 - Check logs for detection events
 
+### Reconciling the paper ledger after downtime (shutdown, crash, etc.)
+`check_and_close_ohlc()` (`backtrack/paper_trading.py`) works from any real OHLC candle stream, not just a live one — so a paper ledger's open positions can be replayed against real historical candles covering exactly the downtime window (Binance klines for crypto, yfinance fallback if that's unreachable; yfinance-only for stock, and a no-op if the whole window was outside NASDAQ hours) to determine whether SL/TP was genuinely crossed while the system was down, using the exact same close logic the live process would have used — not guessed or fabricated. Back up the ledger file first. Verified this exact procedure live on 2026-08-20 after a ~1-hour shutdown: 3 open crypto positions checked against real 1m candles for the gap, none had crossed SL/TP, all confirmed still legitimately open.
+
 ### Dashboard shows a trade but the LLM-consensus path never executes
 This is expected right now — see TL;DR. `TRADE_THRESHOLD=0.55` sits close to the P(Trade) formula's own mathematical ceiling (0.6), and real observed debate scores haven't gotten close. Check `dashboard/consensus_history.json` (or the `consensus_decisions` field in `/api/status`) to see the live P(Trade) distribution.
 
@@ -501,6 +506,7 @@ TraderStuff/
 ├── hmm_windowed_decode_experiment.py # Validates the rolling-window regime-decode fix vs retrospective ground truth
 ├── hmm_regime_filter_backtest.py     # Regime-filtered Path 1 A/B — result: rejected, not deployed
 ├── smc_confidence_matrix_backtest.py # SMC confidence-weighting bonuses — result: mixed, not deployed
+├── backtest_stoploss_matrix.py       # Stop-loss placement variants — ATR rejected, wider FVG-anchored mixed, not deployed
 ├── train_gnn.py                # GNN training from historical candles (separate checkpoint per ASSET_TYPE)
 ├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
 ├── config/
