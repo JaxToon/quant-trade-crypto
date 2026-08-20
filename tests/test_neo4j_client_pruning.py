@@ -49,7 +49,23 @@ class TestPruneOldMacroEvents:
         client = _client_with_mocked_write([{"deleted": 0}])
         client.prune_old_macro_events(90)
         cypher = client.run_write.call_args[0][0]
-        assert "coalesce(e.created_at, e.recovered_at)" in cypher
+        assert "coalesce(e.created_at, e.recovered_at" in cypher
+
+    def test_recovered_at_is_normalized_to_millis_before_compare(self):
+        """Live bug (2026-08-20): created_at is stored as a plain epoch-
+        millis INTEGER, but recovered_at was written as a native Neo4j
+        ZONED DATETIME by the forensic reconstruction script. Cypher's `<`
+        on an INTEGER vs a DATETIME returns NULL (silently excluded from
+        WHERE, not an error) -- coalesce(created_at, recovered_at) alone
+        matched 0 of the 273 recovered nodes at ANY age threshold, making
+        them un-prunable forever, the opposite of this method's intent.
+        .epochMillis normalizes recovered_at to the same type before
+        compare -- verified live against the real database (386/386
+        matched at max_age_days=0, vs 113/386 before this fix)."""
+        client = _client_with_mocked_write([{"deleted": 0}])
+        client.prune_old_macro_events(90)
+        cypher = client.run_write.call_args[0][0]
+        assert "e.recovered_at.epochMillis" in cypher
 
     def test_empty_result_returns_zero(self):
         client = _client_with_mocked_write([])
