@@ -130,6 +130,7 @@ class TestDecisionPathUnchanged:
 
     def test_maybe_open_check_and_close_save_called_exactly_as_before(self, monkeypatch):
         mock_ledger = MagicMock()
+        mock_ledger.open_positions = {}  # nothing already open -- both legs are genuinely new
         mock_ledger.maybe_open.side_effect = ["Stop terlalu rapat", None]  # spot rejected, derivative allowed
         monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
         monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: None)
@@ -176,6 +177,7 @@ class TestDecisionPathUnchanged:
 class TestOnlyActionableLogged:
     def test_non_actionable_insight_is_not_recorded(self, monkeypatch):
         mock_ledger = MagicMock()
+        mock_ledger.open_positions = {}
         mock_ledger.maybe_open.return_value = "not actionable"
         monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
         monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: None)
@@ -187,3 +189,55 @@ class TestOnlyActionableLogged:
         # No setup at all this tick -- nothing "became eligible to act",
         # so nothing should be logged as a candidate.
         assert recorded == []
+
+    def test_already_open_position_is_not_relogged_as_a_new_candidate(self, monkeypatch):
+        """maybe_open() returns None for BOTH "opened a new position" and
+        "already open here, no-op" (see its own docstring) -- this is the
+        real bug found while sanity-running the historical backtest
+        version of this same logic: without checking open_positions
+        BEFORE the call, every 60s cycle a still-valid zone stays
+        actionable re-logs it as if it were a brand new candidate."""
+        mock_ledger = MagicMock()
+        mock_ledger.open_positions = {("AAPL", "spot", "15m"): object(), ("AAPL", "derivative", "15m"): object()}
+        mock_ledger.maybe_open.return_value = None  # both legs: "already open" no-op
+        monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
+        monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: None)
+        recorded = []
+        monkeypatch.setattr(main, "_record_candidate", lambda *a, **kw: recorded.append((a, kw)))
+
+        main._run_paper_trading({"AAPL_15m": _insight(actionable=True)}, {"AAPL": 150.0})
+
+        # Both legs were already open -- maybe_open() still gets called
+        # (decision path unchanged), but nothing gets logged as a "new"
+        # candidate since nothing newly became eligible to act.
+        assert mock_ledger.maybe_open.call_count == 2
+        assert recorded == []
+
+    def test_newly_opened_position_is_logged_but_not_the_following_already_open_cycle(self, monkeypatch):
+        """End-to-end sanity check across two consecutive cycles on the
+        same mutable open_positions dict, mirroring how the real ledger
+        behaves: cycle 1 opens (logged), cycle 2 finds it already open
+        (not re-logged)."""
+        mock_ledger = MagicMock()
+        mock_ledger.open_positions = {}
+
+        def fake_maybe_open(symbol, market, rec, timeframe, current_price):
+            key = (symbol, market, timeframe)
+            if key in mock_ledger.open_positions:
+                return None
+            mock_ledger.open_positions[key] = object()  # simulate a real open
+            return None
+
+        mock_ledger.maybe_open.side_effect = fake_maybe_open
+        monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
+        monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: None)
+        recorded = []
+        monkeypatch.setattr(main, "_record_candidate", lambda *a, **kw: recorded.append((a, kw)))
+
+        insights = {"AAPL_15m": _insight(actionable=True)}
+        main._run_paper_trading(insights, {"AAPL": 150.0})
+        assert len(recorded) == 2  # spot + derivative, both newly opened
+
+        recorded.clear()
+        main._run_paper_trading(insights, {"AAPL": 150.0})
+        assert recorded == []  # same cycle again -- both already open now

@@ -42,6 +42,7 @@ def test_maybe_open_receives_live_price_not_stale_insight_price(monkeypatch):
     signal's own stale per-timeframe price, which never crosses its own
     stop by construction."""
     mock_ledger = MagicMock()
+    mock_ledger.open_positions = {}
     mock_ledger.maybe_open.return_value = None
     monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
     monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: None)
