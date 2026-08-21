@@ -105,6 +105,7 @@ class TestDecisionPathUnchanged:
         monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
         recorded = []
         monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: recorded.append((a, kw)))
+        monkeypatch.setattr(main, "_record_candidate", lambda *a, **kw: None)  # not under test here
 
         insights = {"AAPL_15m": _insight()}
         prices = {"AAPL": 150.0}
@@ -136,6 +137,7 @@ class TestDecisionPathUnchanged:
         monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
         recorded = []
         monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: recorded.append((a, kw)))
+        monkeypatch.setattr(main, "_record_candidate", lambda *a, **kw: None)  # not under test here
 
         rejections = main._run_paper_trading({"AAPL_15m": _insight()}, {"AAPL": 150.0})
 
@@ -148,6 +150,7 @@ class TestDecisionPathUnchanged:
         monkeypatch.setattr(main, "_paper_ledger", None)
         recorded = []
         monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: recorded.append((a, kw)))
+        monkeypatch.setattr(main, "_record_candidate", lambda *a, **kw: None)  # not under test here
 
         rejections = main._run_paper_trading({"AAPL_15m": _insight()}, {"AAPL": 150.0})
 

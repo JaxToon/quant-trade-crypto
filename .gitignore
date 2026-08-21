@@ -15,4 +15,5 @@ dashboard/status*.json
 dashboard/history*.json
 dashboard/consensus_history*.json
 dashboard/rejection_history*.json
+dashboard/candidate_trades*.json
 RESEARCH_NOTES.md
