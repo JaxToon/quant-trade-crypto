@@ -578,11 +578,13 @@ const SYMBOL_COLORS = {
 function buildPath(values, width, height, minY, maxY) {
   const range = (maxY - minY) || 1;
   let d = '';
+  let needsMove = true; // true at the start and right after any gap -- next point begins a new disconnected subpath instead of a line bridging the gap (e.g. NASDAQ closed hours for the stock dashboard, where there's genuinely no price to connect through)
   values.forEach((v, i) => {
-    if (v === null || v === undefined) return;
+    if (v === null || v === undefined) { needsMove = true; return; }
     const x = (i / Math.max(1, values.length - 1)) * width;
     const y = height - ((v - minY) / range) * height;
-    d += (d ? ' L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1);
+    d += (needsMove ? (d ? ' M' : 'M') : ' L') + x.toFixed(1) + ',' + y.toFixed(1);
+    needsMove = false;
   });
   return d;
 }
