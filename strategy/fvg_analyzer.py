@@ -219,7 +219,18 @@ class FairValueGapAnalyzer:
                 type="bullish",
                 high=next_candle.low,
                 low=prev.high,
-                created_at=datetime.utcnow(),
+                # curr's own timestamp, not wall-clock utcnow() -- during a
+                # historical backtest replay, "now" is whatever real time
+                # the backtest happens to be running at, completely
+                # disconnected from the simulated candle timeline. Found
+                # live (2026-08-21) while building a signal-age experiment:
+                # every zone's created_at was "today", regardless of which
+                # historical date was actually being replayed. Matches the
+                # already-correct pattern smart_money.py's OrderBlock uses
+                # (timestamp=curr.timestamp). Harmless in live streaming
+                # (a live candle's timestamp already IS approximately "now"),
+                # but corrupted every zone-age computation done in a backtest.
+                created_at=curr.timestamp,
                 candle_before_high=prev.high,
                 candle_before_low=prev.low,
                 candle_after_high=next_candle.high,
@@ -251,7 +262,7 @@ class FairValueGapAnalyzer:
                 type="bearish",
                 high=prev.low,
                 low=next_candle.high,
-                created_at=datetime.utcnow(),
+                created_at=curr.timestamp,  # see bullish branch above for why not datetime.utcnow()
                 candle_before_high=prev.high,
                 candle_before_low=prev.low,
                 candle_after_high=next_candle.high,
@@ -463,9 +474,21 @@ class FairValueGapAnalyzer:
                     len(cluster.fvgs), cluster.low, cluster.high, cluster.strength
                 )
 
-    def cleanup_old_fvgs(self, max_age_hours: int = 168) -> None:
-        """Remove FVGs older than max_age_hours (default 1 week)."""
-        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    def cleanup_old_fvgs(self, max_age_hours: int = 168, current_time: datetime | None = None) -> None:
+        """Remove FVGs older than max_age_hours (default 1 week).
+
+        current_time: the reference "now" to measure age against. Not
+        currently called from anywhere in this codebase (confirmed via
+        full-repo search while fixing the created_at bug above) -- kept
+        parameterized rather than hardcoded to datetime.utcnow() so that
+        whenever this DOES get wired in, a backtest replay can pass its
+        own simulated current candle time instead of silently comparing
+        historical zones against today's real wall-clock date, repeating
+        the exact bug just fixed in FVGZone construction. Defaults to
+        datetime.utcnow() so live-mode behavior (the only mode this could
+        plausibly run in today, since nothing calls it) is unchanged.
+        """
+        cutoff = (current_time or datetime.utcnow()) - timedelta(hours=max_age_hours)
 
         before_count = len(self.fvgs)
         self.fvgs = deque(
