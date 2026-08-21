@@ -44,6 +44,8 @@ def test_maybe_open_receives_live_price_not_stale_insight_price(monkeypatch):
     mock_ledger = MagicMock()
     mock_ledger.maybe_open.return_value = None
     monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
+    monkeypatch.setattr(main, "_record_rejection", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "_record_candidate", lambda *a, **kw: None)  # not under test here
 
     insights = {"NVDA_1h": _insight()}
     live_prices = {"NVDA": 217.524002}  # already at/through the stop
