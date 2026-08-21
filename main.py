@@ -233,6 +233,74 @@ def _record_rejection(symbol: str, timeframe: str, market: str, reason: str, pri
         logger.debug("Rejection history save failed: %s", exc)
 
 
+# Stage 1 of the entry-selection research line (external playbook review,
+# 2026-08-22, tagged as the v2.5 -> v3 boundary -- see RESEARCH_NOTES.md).
+# Persists EVERY candidate setup entry_insight marks actionable (direction
+# != neutral, real entry_zone) -- accepted or rejected -- with its full SMC
+# feature snapshot at decision time, for future offline meta-label training.
+# Pure observability, identical isolation pattern to REJECTION_HISTORY_FILE
+# above: called AFTER maybe_open() already decided, own try/except, never
+# read by or fed back into maybe_open()/check_and_close()/sizing/
+# correlation cap. Deliberately does NOT duplicate outcome/pnl here for
+# accepted trades -- join against paper_ledger_{asset_type}.json's
+# closed_trades by (symbol, market, timeframe, opened_at) in offline
+# analysis instead of keeping two copies of eventually-mutating state in
+# sync. No model reads this file yet.
+CANDIDATE_LOG_FILE = os.path.join("dashboard", f"candidate_trades_{settings.ASSET_TYPE}.json")
+MAX_CANDIDATE_LOG_POINTS = 5000
+
+
+def _load_candidate_log() -> list[dict]:
+    if not os.path.exists(CANDIDATE_LOG_FILE):
+        return []
+    try:
+        with open(CANDIDATE_LOG_FILE) as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Candidate trade log load failed, starting fresh: %s", exc)
+        return []
+
+
+_candidate_log: list[dict] = _load_candidate_log()
+
+
+def _record_candidate(symbol: str, timeframe: str, market: str, rec: dict, smc_raw: dict,
+                       decision: str, reason: str | None, opened_at: str | None) -> None:
+    try:
+        _candidate_log.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "market": market,
+            "direction": rec.get("direction"),
+            "entry_zone": rec.get("entry_zone"),
+            "stop_loss": rec.get("stop_loss"),
+            "target": rec.get("target"),
+            "confidence": rec.get("confidence", 0.0),
+            "atr": rec.get("atr", 0.0),
+            "decision": decision,       # "accepted" | "rejected"
+            "reason": reason,           # rejection reason, or null if accepted
+            "opened_at": opened_at,     # join key into paper_ledger closed_trades, if accepted
+            "features": {
+                "market_structure": smc_raw.get("market_structure"),
+                "smc_signal": smc_raw.get("smc_signal"),
+                "active_order_blocks": smc_raw.get("active_order_blocks"),
+                "active_fvgs": smc_raw.get("active_fvgs"),
+                "liquidity_zones": smc_raw.get("liquidity_zones"),
+                "in_bullish_ob": smc_raw.get("in_bullish_ob"),
+                "in_bearish_ob": smc_raw.get("in_bearish_ob"),
+                "in_bullish_fvg": smc_raw.get("in_bullish_fvg"),
+                "in_bearish_fvg": smc_raw.get("in_bearish_fvg"),
+            },
+        })
+        if len(_candidate_log) > MAX_CANDIDATE_LOG_POINTS:
+            del _candidate_log[: len(_candidate_log) - MAX_CANDIDATE_LOG_POINTS]
+        with open(CANDIDATE_LOG_FILE, "w") as f:
+            json.dump(_candidate_log, f)
+    except Exception as exc:
+        logger.debug("Candidate trade log save failed: %s", exc)
+
+
 def _validate_config() -> None:
     missing = []
     if not settings.NEO4J_PASSWORD:
@@ -303,6 +371,7 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
             # entirely (confirmed live: NVDA still re-opened/instant-closed
             # after the current_price guard was first deployed).
             current_price = prices.get(symbol)
+            decision_ts = datetime.utcnow().isoformat()
             spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot, timeframe=tf, current_price=current_price)
             deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf, current_price=current_price)
             if spot_reason or deriv_reason:
@@ -312,6 +381,20 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
                     _record_rejection(symbol, tf, "spot", spot_reason, current_price, confidence)
                 if deriv_reason:
                     _record_rejection(symbol, tf, "derivative", deriv_reason, current_price, confidence)
+
+            # Stage 1 candidate-trade log (see CANDIDATE_LOG_FILE above) --
+            # only setups entry_insight actually marked actionable, matching
+            # "the exact moment the production system would have become
+            # eligible to act" rather than every idle no-signal tick.
+            smc_raw = _latest_indicators.get((symbol, tf), {}).get("smc", {})
+            if spot.get("actionable"):
+                _record_candidate(symbol, tf, "spot", spot, smc_raw,
+                                   "rejected" if spot_reason else "accepted", spot_reason,
+                                   None if spot_reason else decision_ts)
+            if derivative.get("actionable"):
+                _record_candidate(symbol, tf, "derivative", derivative, smc_raw,
+                                   "rejected" if deriv_reason else "accepted", deriv_reason,
+                                   None if deriv_reason else decision_ts)
 
         _paper_ledger.check_and_close(prices)
         _paper_ledger.save()
