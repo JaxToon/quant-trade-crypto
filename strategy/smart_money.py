@@ -110,10 +110,19 @@ class FairValueGap:
 
 @dataclass
 class MarketStructure:
-    """Market Structure: Higher Highs, Lower Lows, etc."""
+    """Market Structure: Higher Highs, Lower Lows, etc.
+
+    last_high / last_low are the most recent CONFIRMED swing pivots (see
+    SmartMoneyAnalyzer._find_confirmed_swing_pivots()) -- live structural
+    references that update on every new confirmed pivot regardless of
+    current trend, not "whatever was current when trend last flipped" (the
+    pre-2026-08-21 bug -- see _update_market_structure()'s docstring).
+    None until at least one confirmed high AND one confirmed low pivot
+    exist; no directional trend is forced before then.
+    """
     trend: Literal["bullish", "bearish", "ranging"]
-    last_high: float
-    last_low: float
+    last_high: float | None
+    last_low: float | None
     higher_high: float | None = None
     lower_low: float | None = None
     timestamp: datetime = None
@@ -285,49 +294,119 @@ class SmartMoneyAnalyzer:
         # Cleanup: remove fully mitigated FVGs
         self.fvgs = [fvg for fvg in self.fvgs if not fvg.mitigated][-20:]
 
+    def _find_confirmed_swing_pivots(self) -> tuple[list[tuple[int, float, datetime, Candle]], list[tuple[int, float, datetime, Candle]]]:
+        """
+        Shared causal pivot primitive: a swing high/low at candle index i is
+        only reported once candles i+1 and i+2 have ALSO closed (2-candle-
+        each-side confirmation) -- nothing here ever looks past the latest
+        closed candle. Used by both _detect_liquidity_zones() (pure
+        extraction of its pre-existing logic -- same thresholds, same
+        behavior, not redefined) and _update_market_structure() (which
+        previously computed its own, buggy, 10-candle-window max/min instead
+        of reusing this -- see that method's docstring).
+
+        Returns (swing_highs, swing_lows), each a chronological list of
+        (index, price, timestamp, candle) tuples.
+        """
+        candles = list(self.candles)
+        highs: list[tuple[int, float, datetime, Candle]] = []
+        lows: list[tuple[int, float, datetime, Candle]] = []
+        if len(candles) < 7:
+            return highs, lows
+
+        for i in range(3, len(candles) - 3):
+            curr = candles[i]
+
+            # Swing High: local high with lower highs on both sides
+            if (curr.high > candles[i - 1].high and curr.high > candles[i - 2].high and
+                    curr.high > candles[i + 1].high and curr.high > candles[i + 2].high):
+                highs.append((i, curr.high, curr.timestamp, curr))
+
+            # Swing Low: local low with higher lows on both sides
+            if (curr.low < candles[i - 1].low and curr.low < candles[i - 2].low and
+                    curr.low < candles[i + 1].low and curr.low < candles[i + 2].low):
+                lows.append((i, curr.low, curr.timestamp, curr))
+
+        return highs, lows
+
     def _update_market_structure(self) -> None:
         """
-        Update market structure: identify swing highs/lows and trend.
-        BOS (Break of Structure) and ChoCH (Change of Character) detection.
+        Update market structure: last_high/last_low as live confirmed-pivot
+        references, trend via BOS (Break of Structure) / ChoCH (Change of
+        Character).
+
+        Fixed 2026-08-21 (see tests/test_market_structure.py for the
+        regression suite this was built against). The previous version
+        tracked last_high/last_low as "whatever the 10-candle max/min was
+        the moment trend last flipped" -- it only updated last_high inside
+        the bullish-flip branch and last_low inside the bearish-flip branch,
+        so once trend first flipped, the OTHER reference froze at its value
+        from that moment and could never update again short of price
+        revisiting that exact original level. Confirmed live (zero trend
+        flips logged across a 9.5h continuous uptime segment spanning 8
+        symbols x 3 timeframes, after the startup warmup burst) and via a
+        synthetic BTC-shaped test (chop -> uptrend to $69k -> simulated
+        -78% crash to $15.5k: trend flipped bullish once, early, and never
+        flipped again through the crash, because $15,347 never came
+        anywhere near the ~$3,646 reference frozen at the very start).
+
+        Semantics (deliberately chosen over a simpler always-updating
+        rolling window -- see README Contributing section):
+          last_high / last_low = the most recent CONFIRMED swing pivot (via
+            _find_confirmed_swing_pivots(), shared with liquidity-zone
+            detection) -- refreshed on EVERY call regardless of current
+            trend. "Structural reference" and "trend label" are now
+            separate concerns, not coupled through one if/elif.
+          BOS = latest close breaks the relevant level IN the direction of
+            the current trend -- continuation, trend unchanged, not logged.
+          ChoCH = latest close breaks the relevant level AGAINST the
+            current trend -- trend flips, logged.
+          Initial state stays "ranging" until at least one confirmed high
+            AND one confirmed low pivot exist -- no directional label is
+            forced off incomplete structure.
         """
-        if len(self.candles) < 10:
+        candles = list(self.candles)
+        if len(candles) < 10:
             return
 
-        candles = list(self.candles)
-        highs = [c.high for c in candles[-10:]]
-        lows = [c.low for c in candles[-10:]]
+        highs, lows = self._find_confirmed_swing_pivots()
+        if not highs or not lows:
+            if self.market_structure is None:
+                self.market_structure = MarketStructure(
+                    trend="ranging", last_high=None, last_low=None, timestamp=candles[-1].timestamp,
+                )
+            return
 
-        recent_high = max(highs)
-        recent_low = min(lows)
+        latest_high_price = highs[-1][1]
+        latest_low_price = lows[-1][1]
+        latest_close = candles[-1].close
 
-        # Simple trend detection
         if self.market_structure is None:
             self.market_structure = MarketStructure(
-                trend="ranging",
-                last_high=recent_high,
-                last_low=recent_low,
-                timestamp=candles[-1].timestamp
+                trend="ranging", last_high=latest_high_price, last_low=latest_low_price,
+                timestamp=candles[-1].timestamp,
             )
+        ms = self.market_structure
+        ms.last_high = latest_high_price
+        ms.last_low = latest_low_price
+
+        if latest_close > ms.last_high:
+            new_trend = "bullish"
+            ms.higher_high = ms.last_high
+        elif latest_close < ms.last_low:
+            new_trend = "bearish"
+            ms.lower_low = ms.last_low
         else:
-            ms = self.market_structure
+            new_trend = ms.trend  # inside the range -- no break this bar
 
-            # Check for Higher High (HH)
-            if recent_high > ms.last_high:
-                ms.higher_high = recent_high
-                if ms.trend != "bullish":
-                    logger.info("ChoCH: Market structure changed to BULLISH")
-                ms.trend = "bullish"
-                ms.last_high = recent_high
-
-            # Check for Lower Low (LL)
-            elif recent_low < ms.last_low:
-                ms.lower_low = recent_low
-                if ms.trend != "bearish":
-                    logger.info("ChoCH: Market structure changed to BEARISH")
-                ms.trend = "bearish"
-                ms.last_low = recent_low
-
-            ms.timestamp = candles[-1].timestamp
+        if new_trend != ms.trend:
+            logger.info(
+                "%s: Market structure changed to %s",
+                "ChoCH" if ms.trend != "ranging" else "Initial structure",
+                new_trend.upper(),
+            )
+        ms.trend = new_trend
+        ms.timestamp = candles[-1].timestamp
 
     def _detect_liquidity_zones(self) -> None:
         """
@@ -337,49 +416,20 @@ class SmartMoneyAnalyzer:
         if len(self.candles) < 7:
             return
 
-        candles = list(self.candles)
+        highs, lows = self._find_confirmed_swing_pivots()
 
-        for i in range(3, len(candles) - 3):
-            curr = candles[i]
+        for _, price, ts, curr in highs:
+            liq = LiquidityZone(type="buy_side", price=price, timestamp=ts, volume_profile=curr.volume)
+            if not self._is_duplicate_liquidity(liq):
+                self.liquidity_zones.append(liq)
 
-            # Swing High: local high with lower highs on both sides
-            is_swing_high = (
-                curr.high > candles[i-1].high and
-                curr.high > candles[i-2].high and
-                curr.high > candles[i+1].high and
-                curr.high > candles[i+2].high
-            )
-
-            if is_swing_high:
-                liq = LiquidityZone(
-                    type="buy_side",
-                    price=curr.high,
-                    timestamp=curr.timestamp,
-                    volume_profile=curr.volume
-                )
-                if not self._is_duplicate_liquidity(liq):
-                    self.liquidity_zones.append(liq)
-
-            # Swing Low: local low with higher lows on both sides
-            is_swing_low = (
-                curr.low < candles[i-1].low and
-                curr.low < candles[i-2].low and
-                curr.low < candles[i+1].low and
-                curr.low < candles[i+2].low
-            )
-
-            if is_swing_low:
-                liq = LiquidityZone(
-                    type="sell_side",
-                    price=curr.low,
-                    timestamp=curr.timestamp,
-                    volume_profile=curr.volume
-                )
-                if not self._is_duplicate_liquidity(liq):
-                    self.liquidity_zones.append(liq)
+        for _, price, ts, curr in lows:
+            liq = LiquidityZone(type="sell_side", price=price, timestamp=ts, volume_profile=curr.volume)
+            if not self._is_duplicate_liquidity(liq):
+                self.liquidity_zones.append(liq)
 
         # Check for swept liquidity
-        current_price = candles[-1].close
+        current_price = list(self.candles)[-1].close
         for liq in self.liquidity_zones:
             if not liq.swept:
                 if liq.type == "buy_side" and current_price > liq.price:
