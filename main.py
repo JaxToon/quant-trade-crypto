@@ -181,6 +181,58 @@ def _consensus_stats() -> dict:
     }
 
 
+# Pure observability, not decision infrastructure: paper_trade_rejections
+# (see _run_paper_trading below) was already computed every cycle but only
+# ever written into the live status payload, overwritten on the next tick
+# — so "rejection distribution over time" had no data to analyze, only a
+# single instant's snapshot. This is a separate, additive history file;
+# it never feeds back into maybe_open(), check_and_close(), sizing, or the
+# correlation cap — those stay exactly as they already decided, on their
+# own, before this ever runs. Same bounded/isolated pattern as
+# _consensus_history above (2000-point cap, own try/except) rather than
+# repeating this session's own trader.log/Macro_Event unbounded-growth
+# lesson on a fresh file.
+REJECTION_HISTORY_FILE = os.path.join("dashboard", f"rejection_history_{settings.ASSET_TYPE}.json")
+MAX_REJECTION_HISTORY_POINTS = 2000
+
+
+def _load_rejection_history() -> list[dict]:
+    if not os.path.exists(REJECTION_HISTORY_FILE):
+        return []
+    try:
+        with open(REJECTION_HISTORY_FILE) as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Rejection history load failed, starting fresh: %s", exc)
+        return []
+
+
+_rejection_history: list[dict] = _load_rejection_history()
+
+
+def _record_rejection(symbol: str, timeframe: str, market: str, reason: str, price: float | None, confidence: float) -> None:
+    """Records a rejection maybe_open() already decided on its own —
+    never influences that decision, only observes it after the fact.
+    Isolated in its own try/except so a bug here can never reach the
+    actual trading loop (mirrors _record_consensus_decision's guard)."""
+    try:
+        _rejection_history.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "market": market,
+            "reason": reason,
+            "price": price,
+            "confidence": confidence,
+        })
+        if len(_rejection_history) > MAX_REJECTION_HISTORY_POINTS:
+            del _rejection_history[: len(_rejection_history) - MAX_REJECTION_HISTORY_POINTS]
+        with open(REJECTION_HISTORY_FILE, "w") as f:
+            json.dump(_rejection_history, f)
+    except Exception as exc:
+        logger.debug("Rejection history save failed: %s", exc)
+
+
 def _validate_config() -> None:
     missing = []
     if not settings.NEO4J_PASSWORD:
@@ -255,6 +307,11 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
             deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf, current_price=current_price)
             if spot_reason or deriv_reason:
                 rejections[insight_key] = {"spot": spot_reason, "derivative": deriv_reason}
+                confidence = ins.get("confidence", 0.0)
+                if spot_reason:
+                    _record_rejection(symbol, tf, "spot", spot_reason, current_price, confidence)
+                if deriv_reason:
+                    _record_rejection(symbol, tf, "derivative", deriv_reason, current_price, confidence)
 
         _paper_ledger.check_and_close(prices)
         _paper_ledger.save()
