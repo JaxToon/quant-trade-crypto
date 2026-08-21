@@ -372,6 +372,16 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
             # after the current_price guard was first deployed).
             current_price = prices.get(symbol)
             decision_ts = datetime.utcnow().isoformat()
+            # maybe_open() returns None for TWO different situations: "a new
+            # position was opened" and "a position was already open here,
+            # nothing to do" (see its own docstring). Only the first is a
+            # genuine new candidate -- checking open_positions BEFORE the
+            # call is the only way to tell them apart, since the return
+            # value alone can't. Without this, every 60s cycle a still-valid
+            # zone stays actionable would log a fresh "accepted" candidate
+            # for what's really the same ongoing position.
+            spot_already_open = (symbol, "spot", tf) in _paper_ledger.open_positions
+            deriv_already_open = (symbol, "derivative", tf) in _paper_ledger.open_positions
             spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot, timeframe=tf, current_price=current_price)
             deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf, current_price=current_price)
             if spot_reason or deriv_reason:
@@ -383,15 +393,17 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
                     _record_rejection(symbol, tf, "derivative", deriv_reason, current_price, confidence)
 
             # Stage 1 candidate-trade log (see CANDIDATE_LOG_FILE above) --
-            # only setups entry_insight actually marked actionable, matching
-            # "the exact moment the production system would have become
-            # eligible to act" rather than every idle no-signal tick.
+            # only setups entry_insight actually marked actionable AND that
+            # weren't already an open position, matching "the exact moment
+            # the production system would have become eligible to act"
+            # rather than every idle no-signal tick, or every repeat cycle
+            # an already-open position's zone happens to still be actionable.
             smc_raw = _latest_indicators.get((symbol, tf), {}).get("smc", {})
-            if spot.get("actionable"):
+            if spot.get("actionable") and not spot_already_open:
                 _record_candidate(symbol, tf, "spot", spot, smc_raw,
                                    "rejected" if spot_reason else "accepted", spot_reason,
                                    None if spot_reason else decision_ts)
-            if derivative.get("actionable"):
+            if derivative.get("actionable") and not deriv_already_open:
                 _record_candidate(symbol, tf, "derivative", derivative, smc_raw,
                                    "rejected" if deriv_reason else "accepted", deriv_reason,
                                    None if deriv_reason else decision_ts)

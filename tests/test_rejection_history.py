@@ -101,6 +101,7 @@ class TestDecisionPathUnchanged:
 
     def test_maybe_open_check_and_close_save_called_exactly_as_before(self, monkeypatch):
         mock_ledger = MagicMock()
+        mock_ledger.open_positions = {}
         mock_ledger.maybe_open.side_effect = ["Stop terlalu rapat", None]  # spot rejected, derivative allowed
         monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
         recorded = []
@@ -133,6 +134,7 @@ class TestDecisionPathUnchanged:
 
     def test_no_rejection_no_recording(self, monkeypatch):
         mock_ledger = MagicMock()
+        mock_ledger.open_positions = {}
         mock_ledger.maybe_open.return_value = None  # nothing rejected on either leg
         monkeypatch.setattr(main, "_paper_ledger", mock_ledger)
         recorded = []
