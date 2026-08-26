@@ -8,6 +8,7 @@ build/
 .venv/
 venv/
 *.log
+*.log.*
 trade_log.db
 backtrack_logs/
 model_checkpoints/
