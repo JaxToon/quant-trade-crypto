@@ -22,8 +22,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime
-
+from datetime import datetime, timedelta
 import schedule
 from binance.client import Client
 
@@ -69,7 +68,7 @@ except ImportError as e:
     GraphPopulator = None
 from backtrack.paper_trading import PaperTradingLedger
 from risk.circuit_breaker import CircuitBreaker
-from risk.hmm_regime import RegimeDetector
+from risk.hmm_regime import HMM_CHECKPOINT, RegimeDetector
 from strategy.consensus import evaluate_trade
 from strategy.entry_insight import build_entry_insight
 from strategy.execution import ExecutionEngine
@@ -299,6 +298,38 @@ def _record_candidate(symbol: str, timeframe: str, market: str, rec: dict, smc_r
             json.dump(_candidate_log, f)
     except Exception as exc:
         logger.debug("Candidate trade log save failed: %s", exc)
+
+
+def _is_hmm_checkpoint_stale(max_age_days: int = 7) -> bool:
+    """
+    The weekly HMM refit (schedule.every().monday.at("01:00"), registered
+    further down in main()) has no catch-up mechanism -- if the process
+    isn't alive at exactly that moment (a restart, a crash, a multi-day gap
+    like the ~86h one this session had spanning right over a Monday), the
+    refit is silently skipped and the checkpoint keeps aging indefinitely.
+
+    Confirmed live 2026-08-26: checkpoint was last fit 2026-08-18, 8+ days
+    stale, and its calm/turbulent volatility clusters (means_[:,0] =
+    0.00269 / 0.00514) no longer bracket real recent volatility (5d median
+    0.00461 -- much closer to "turbulent" than "calm") -- causing
+    HIGH_STRESS_TURBULENT to fire on ~95% of regime checks across this
+    session (2505/2627 logged), vs the ~34-45% turbulent fraction this
+    project's own regime research found historically. That silently
+    blocked circuit.bear_veto_active from ever clearing, which blocks
+    decision_loop's entire debate cycle -- a real contributor to Path 2
+    never closing a trade, on top of the separate prompt-asymmetry and
+    API-credit issues found the same day.
+
+    Used at startup (see main()) to catch up when the checkpoint is stale,
+    not just when it's missing entirely -- max_age_days=7 matches the
+    weekly refit cadence itself, so a checkpoint is never allowed to be
+    older than one full refit cycle regardless of how many restarts the
+    process goes through.
+    """
+    if not os.path.exists(HMM_CHECKPOINT):
+        return True
+    age = datetime.utcnow() - datetime.utcfromtimestamp(os.path.getmtime(HMM_CHECKPOINT))
+    return age > timedelta(days=max_age_days)
 
 
 def _validate_config() -> None:
@@ -586,7 +617,7 @@ async def async_main() -> None:
     logger.info("Setting up regime detector...")
     regime_detector = RegimeDetector()
     circuit = CircuitBreaker(regime_detector)
-    if not hasattr(regime_detector, "_model") or regime_detector._model is None:
+    if not hasattr(regime_detector, "_model") or regime_detector._model is None or _is_hmm_checkpoint_stale():
         regime_detector.fit(binance_client, days=60)
 
     # 4. GNN
