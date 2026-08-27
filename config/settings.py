@@ -226,7 +226,16 @@ PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER = 2.5
 # describes an ISOLATED trade — this caps the aggregate, correlation-
 # weighted exposure across everything currently open. See strategy/correlation.py.
 PORTFOLIO_CORRELATION_THRESHOLD = 0.5   # only count exposure from pairs correlated >= this
-PORTFOLIO_MAX_CORRELATED_RISK_PCT = 0.08  # cap correlation-weighted aggregate risk at 8% of starting balance
+# Env-overridable (like PAPER_TRADING_STARTING_BALANCE) so this can be tuned
+# without a code edit — 0.08 (8%, $800 on a $10k account) is the long-standing
+# default. Backtest evidence (RESEARCH_NOTES.md, "Correlation cap vs short
+# sizing", 2026-08-27): raising it to 0.12 (1.5x) improved 2yr backtested
+# return +65% with max drawdown slightly BETTER than default across 6
+# market regimes; 0.16 (2x) improved return further but roughly doubled the
+# worst-single-day dollar loss; 0.24 (3x) was rejected outright — drawdown
+# 47% worse, worst-day loss near-wiped the starting balance. Not yet
+# deployed at a new default; override via .env to experiment.
+PORTFOLIO_MAX_CORRELATED_RISK_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_RISK_PCT", "0.08"))
 
 # ATR-based trailing stop: once a position has moved favorably by
 # PAPER_TRADING_TRAILING_ACTIVATION_R multiples of its own initial risk
