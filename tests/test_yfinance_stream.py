@@ -127,25 +127,31 @@ class TestClosedBarDetection:
     underlying data (e.g. market closed, or polled faster than a new bar
     forms) must not re-fire — mirrors tradingview_stream.py's _is_new_bar
     reasoning, but via comparing the last CLOSED bar's own timestamp
-    rather than a fixed time-bucket."""
+    rather than a fixed time-bucket.
+
+    _poll_symbol takes an already-fetched DataFrame directly (not a period
+    string) since 2026-08-27 -- the yf.download() call itself moved to
+    start()'s loop, wrapped in asyncio.to_thread, so a slow/retrying Yahoo
+    request can no longer freeze the shared event loop for every symbol
+    and every YFinanceStream instance at once (confirmed live: this
+    caused a ~1.5-2h total stall that let a real stop-loss breach go
+    unresolved — see RESEARCH_NOTES.md). These tests exercise _poll_symbol
+    directly with synthetic DataFrames, same as before, just without the
+    yf.download monkeypatch layer.
+    """
 
     def test_first_poll_fires_second_does_not(self, monkeypatch):
         stream = YFinanceStream(interval="5m")
         events = []
         stream.add_callback(lambda sym, data: events.append((sym, data)))
-
-        df = _synthetic_df(n=30)
-        monkeypatch.setattr(
-            "ingestion.yfinance_stream.yf.download",
-            lambda *a, **k: df,
-        )
         monkeypatch.setattr(
             "ingestion.yfinance_stream.Neo4jClient.get",
             lambda: type("_C", (), {"update_token_market_data": lambda self, *a, **k: None})(),
         )
 
-        stream._poll_symbol("AAPL", "5d")
-        stream._poll_symbol("AAPL", "5d")  # identical data -- must not re-fire
+        df = _synthetic_df(n=30)
+        stream._poll_symbol("AAPL", df)
+        stream._poll_symbol("AAPL", df)  # identical data -- must not re-fire
 
         assert len(events) == 1
 
@@ -160,12 +166,10 @@ class TestClosedBarDetection:
         )
 
         df1 = _synthetic_df(n=30)
-        monkeypatch.setattr("ingestion.yfinance_stream.yf.download", lambda *a, **k: df1)
-        stream._poll_symbol("AAPL", "5d")
+        stream._poll_symbol("AAPL", df1)
 
         df2 = _synthetic_df(n=31)  # one more real bar has formed
-        monkeypatch.setattr("ingestion.yfinance_stream.yf.download", lambda *a, **k: df2)
-        stream._poll_symbol("AAPL", "5d")
+        stream._poll_symbol("AAPL", df2)
 
         assert len(events) == 2
 
@@ -175,22 +179,19 @@ class TestClosedBarDetection:
         stream = YFinanceStream(interval="5m")
         events = []
         stream.add_callback(lambda sym, data: events.append((sym, data)))
-
-        df = _synthetic_df(n=30)
-        monkeypatch.setattr("ingestion.yfinance_stream.yf.download", lambda *a, **k: df)
         monkeypatch.setattr(
             "ingestion.yfinance_stream.Neo4jClient.get",
             lambda: type("_C", (), {"update_token_market_data": lambda self, *a, **k: None})(),
         )
 
-        stream._poll_symbol("AAPL", "5d")
+        df = _synthetic_df(n=30)
+        stream._poll_symbol("AAPL", df)
         assert events[0][1]["price"] == pytest.approx(float(df.iloc[-2]["Close"]))
 
     def test_empty_dataframe_does_not_crash_or_fire(self, monkeypatch):
         stream = YFinanceStream(interval="5m")
         events = []
         stream.add_callback(lambda sym, data: events.append((sym, data)))
-        monkeypatch.setattr("ingestion.yfinance_stream.yf.download", lambda *a, **k: pd.DataFrame())
 
-        stream._poll_symbol("AAPL", "5d")
+        stream._poll_symbol("AAPL", pd.DataFrame())
         assert events == []
