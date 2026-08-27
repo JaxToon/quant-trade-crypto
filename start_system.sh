@@ -25,7 +25,7 @@ if [ -n "$existing" ]; then
 fi
 
 echo "=== Reconciling downtime (if any open positions exist from before) ==="
-python reconcile_downtime.py --asset-type both || echo "(reconcile_downtime.py exited non-zero -- check output above; continuing to start anyway)"
+.venv/Scripts/python reconcile_downtime.py --asset-type both || echo "(reconcile_downtime.py exited non-zero -- check output above; continuing to start anyway)"
 
 echo ""
 echo "=== Starting crypto process (default env) ==="
