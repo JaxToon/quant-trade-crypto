@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, time as dtime
 from typing import Callable, Literal
 from zoneinfo import ZoneInfo
@@ -58,6 +59,12 @@ INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 # reasoning train_gnn.py/structured_stream.py already apply. Comfortably
 # inside yfinance's own per-interval limits for a short recent window.
 FETCH_PERIOD = {"1m": "5d", "5m": "10d", "15m": "20d", "1h": "60d"}
+
+# yf.download()'s own default timeout is 10s -- a fetch taking meaningfully
+# longer than that means Yahoo is already degraded/rate-limiting/retrying.
+# Logged as a live WARNING (see start()) rather than only discoverable in
+# hindsight -- see RESEARCH_NOTES.md, "silent stock-stream stall".
+STALE_FETCH_WARNING_SECONDS = 20
 
 
 def is_regular_session(now_et: datetime) -> bool:
@@ -186,14 +193,51 @@ class YFinanceStream:
             for symbol in settings.WATCHLIST:
                 await asyncio.sleep(0.5)
                 try:
-                    self._poll_symbol(symbol, period)
+                    # yf.download() is a synchronous, blocking network call —
+                    # three YFinanceStream instances (5m/15m/1h) run
+                    # concurrently via asyncio.gather on ONE shared event loop
+                    # (see IntegratedMarketStream), so calling it directly
+                    # here means a single slow/retrying Yahoo request freezes
+                    # ALL streams and ALL symbols at once, not just this poll.
+                    # Confirmed live: a ~1.5-2h total silence across every
+                    # stock symbol on 2026-08-26 caused a real stop-loss
+                    # breach (TSLA) to go unresolved — see RESEARCH_NOTES.md.
+                    # to_thread wraps ONLY the network fetch, not the rest of
+                    # _poll_symbol (Neo4j write, SMC/paper-trading callbacks)
+                    # deliberately — those touch shared per-symbol analyzer
+                    # state and the shared paper ledger, which stay race-free
+                    # only if they keep running single-threaded on the event
+                    # loop, same as before this fix.
+                    # Watchdog: yf.download's own default timeout is 10s, so
+                    # a fetch taking meaningfully longer means it's already
+                    # retrying/degraded on Yahoo's side -- log it as it
+                    # happens rather than only discovering a stall in
+                    # hindsight (see RESEARCH_NOTES.md, "silent stock-stream
+                    # stall" -- the whole point of this watchdog is that
+                    # incident would have shown up here in real time instead
+                    # of needing a manual historical-data investigation days
+                    # later).
+                    fetch_started = time.monotonic()
+                    df = await asyncio.to_thread(
+                        yf.download, symbol, period=period, interval=self.interval,
+                        progress=False, auto_adjust=True, prepost=False,
+                    )
+                    fetch_seconds = time.monotonic() - fetch_started
+                    if fetch_seconds > STALE_FETCH_WARNING_SECONDS:
+                        logger.warning(
+                            "%s [%s]: yfinance fetch took %.1fs (>%ds threshold) -- "
+                            "Yahoo may be degraded/rate-limiting; other symbols and "
+                            "streams were blocked from polling for this long too "
+                            "before the 2026-08-27 to_thread fix.",
+                            symbol, self.interval_str, fetch_seconds, STALE_FETCH_WARNING_SECONDS,
+                        )
+                    self._poll_symbol(symbol, df)
                 except Exception as exc:
                     logger.error("yfinance poll error for %s: %s", symbol, exc)
 
             await asyncio.sleep(INTERVAL_SECONDS.get(self.interval, 300))
 
-    def _poll_symbol(self, symbol: str, period: str) -> None:
-        df = yf.download(symbol, period=period, interval=self.interval, progress=False, auto_adjust=True, prepost=False)
+    def _poll_symbol(self, symbol: str, df: pd.DataFrame) -> None:
         if df.empty or len(df) < 2:
             return
         if isinstance(df.columns, pd.MultiIndex):
