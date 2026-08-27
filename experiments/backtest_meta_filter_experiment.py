@@ -39,7 +39,7 @@ from __future__ import annotations
 import argparse
 
 from backtest import CRYPTO_TICKERS
-from backtest_concurrence_experiment import (
+from .backtest_concurrence_experiment import (
     TIMEFRAMES,
     _classify_concurrence,
     _fetch_all,

@@ -8,20 +8,21 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 - **No real money at risk right now.** There are two separate decision paths, both simulated:
   1. **SMC/FVG entry-insight + $10k virtual paper-trading ledger** — read-only dashboard recommendations, scored against live price with a fixed-risk simulated account. This is the path with real backtested evidence behind it.
   2. **Multi-agent LLM consensus (Bull/Bear/Critic) + Binance testnet orders** — a separate, independent path (`strategy/agents.py` → `consensus.py` → `execution.py`). Places real orders, but only on Binance's testnet (fake funds). **If this path is ever pointed at a real account:** it already places real, exchange-side `STOP_LOSS_LIMIT`/`TAKE_PROFIT_LIMIT` orders (GTC) at entry time — protection lives on Binance's own matching engine, not in this process, so a laptop shutdown does not leave a position unprotected. Position state also persists to disk across restarts. Unexercised in practice, though — it has never actually closed a real trade, even on testnet (see below).
-- **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap. A separate target/exit backtest matrix (`backtest_target_matrix.py`) confirmed the live FVG-gap-based target is already the best of 7 tested variants at 5m/15m on expectancy *and* drawdown — wider targets (1-2x the gap, or fixed 2R/3R/5R) are strictly worse, monotonically, the wider they get.
+- **What's actually validated:** a 2-year backtest (`backtest.py`) shows win rate holding in a 55–61% band across 6 different market regimes — not just one lucky window. Position sizing is fee-aware and capped by a portfolio-level correlation risk cap. A separate target/exit backtest matrix (`experiments/backtest_target_matrix.py`) confirmed the live FVG-gap-based target is already the best of 7 tested variants at 5m/15m on expectancy *and* drawdown — wider targets (1-2x the gap, or fixed 2R/3R/5R) are strictly worse, monotonically, the wider they get.
+  - **~70 backtest configurations across 11 technical-analysis confluence filters (VWAP, EMA, RSI, MACD, Stochastic, CCI, Bollinger, ADX, volume, OBV, Donchian), their combinations, and 5 standalone crossover/breakout strategies — none beat the SMC/FVG baseline once tested across a full 2-year, 6-regime window.** Standalone TA strategies with no SMC/FVG involvement lose money outright where baseline earns $200-290K — the strongest evidence yet that the structural entry logic is doing real work. See `experiments/full_ta_robustness_validation.py`, `experiments/combo_multiregime_robustness.py`, `experiments/standalone_ta_strategies_robustness.py`, full detail in `RESEARCH_NOTES.md`.
 - **What's not yet proven:**
   - **GNN's contribution is measured as negligible** in a properly controlled ablation (SMC-only vs SMC+GNN: identical win rate, identical trade count, on real data).
   - **The stock/NASDAQ path now runs end-to-end and has its first real live samples**: 4 closed trades (75% win rate, +12.3% on the $10k paper balance) plus 5 open as of this writing — still far too small to judge, but no longer a zero-sample path. See "Switch to Stock Trading" below.
   - **The LLM-consensus/testnet path's decision quality is unaudited** — it has literally never closed a trade, and its execute threshold appears very hard to reach given the formula's own math (see `TRADE_THRESHOLD` in Configuration below).
   - **Live paper-trading sample size is still small** — treat live figures and any per-timeframe/per-market breakdown as directional, not statistically meaningful yet — 1-8 trades per bucket is noise, not signal.
-  - **A regime-based entry filter for Path 1 was tested and rejected** (worse expectancy/win rate at 5m/15m, worse drawdown at 1h). Not deployed. See `hmm_regime_filter_backtest.py`.
+  - **A regime-based entry filter for Path 1 was tested and rejected** (worse expectancy/win rate at 5m/15m, worse drawdown at 1h). Not deployed. See `experiments/hmm_regime_filter_backtest.py`.
   - **A real live bug was found and fixed: `market_structure.trend` could get permanently stuck**, feeding stale direction into Path 1, Path 2's LLM context, FVG confidence, and GNN features. Fixed (confirmed swing pivots + BOS/ChoCH), regression-tested (147/147 passing), A/B-validated before deploying, and live since 2026-08-21. `circuit_breaker.py` untouched. See `strategy/smart_money.py`, `tests/test_market_structure.py` — full forensics in `RESEARCH_NOTES.md` (local, gitignored).
   - **Regime × direction research for Path 2's bear-veto — CLOSED.** SMC direction carries real directional information (bullish consistently outperforms bearish), but a rigorous interaction + tail-exceedance test (block bootstrap over calendar weeks) found no basis to make the volatility circuit breaker direction-aware — the effect is a main effect, not a turbulence-specific interaction. Symmetric veto retained, `circuit_breaker.py` untouched throughout. Full arc (including a real bug found and fixed along the way) in `RESEARCH_NOTES.md`.
-  - **SMC confidence-weighting was tested and not deployed** (mixed result). See `smc_confidence_matrix_backtest.py`.
-  - **A stop-loss placement matrix was tested**: ATR-based stops decisively rejected, wider FVG-anchored stops mixed. Neither deployed. See `backtest_stoploss_matrix.py`.
-  - **A momentum/breakout overlay was tested and decisively rejected** (9/9 losing across 5m/15m/1h). See `backtest_momentum_coverage_experiment.py`.
-  - **A higher-timeframe (HTF) bias filter is a research candidate, not deployment-ready** — evidence got more calibrated as evaluation resolution increased, but the open question ("what conditions make 1h bias help 15m vs. over-filter it") isn't answered yet. See `backtest_htf_bias_experiment.py`.
-  - **The stock path has almost no news/macro-event coverage** — a real, quantified gap (0 live mentions across all 8 companies), not yet fixed. See `audit_news_coverage.py`.
+  - **SMC confidence-weighting was tested and not deployed** (mixed result). See `experiments/smc_confidence_matrix_backtest.py`.
+  - **A stop-loss placement matrix was tested**: ATR-based stops decisively rejected, wider FVG-anchored stops mixed. Neither deployed. See `experiments/backtest_stoploss_matrix.py`.
+  - **A momentum/breakout overlay was tested and decisively rejected** (9/9 losing across 5m/15m/1h). See `experiments/backtest_momentum_coverage_experiment.py`.
+  - **A higher-timeframe (HTF) bias filter is a research candidate, not deployment-ready** — evidence got more calibrated as evaluation resolution increased, but the open question ("what conditions make 1h bias help 15m vs. over-filter it") isn't answered yet. See `experiments/backtest_htf_bias_experiment.py`.
+  - **The stock path has almost no news/macro-event coverage** — a real, quantified gap (0 live mentions across all 8 companies), not yet fixed. See `experiments/audit_news_coverage.py`.
 - **A handful of real bugs were found and fixed across this project's history** (regime-detection single-observation decode, a paper-trading phantom-trade guard, a Neo4j concurrent-startup race, a Macro_Event pruning type mismatch, unbounded log growth, FVG zone timestamp fidelity) — each traced to its actual blast radius before fixing, each covered by tests. See `RESEARCH_NOTES.md` for the full write-ups, or `git log` for the commits.
 - **Where to look next:** `DEPLOYMENT.md` for persistence/cloud-deployment notes, `python backtest.py --help`-style flags below for validation tooling, `dashboard/consensus_history.json` (via `/api/status`) for the LLM-consensus path's live decision history, `RESEARCH_NOTES.md` (local, gitignored) for full research/bug forensics.
 
@@ -191,20 +192,25 @@ python backtest.py --slippage-sweep                     # finds the slippage lev
 
 All modes replay real historical candles (yfinance) through the same `entry_insight` pipeline the dashboard uses live, in true chronological lockstep across symbols — not one-symbol-fully-then-the-next, which would hide the portfolio correlation cap's real cross-symbol behavior. Results save to `backtrack_logs/backtest_ledger_*.json`, separate from the live paper ledger.
 
-**Related validation tooling** (all quantitative-only — none of these change live strategy code unless a result explicitly earns it):
+**Related validation tooling** — all one-off research/validation scripts live in `experiments/` (a Python package; run from the repo root with `python -m experiments.<name>`, not `python experiments/<name>.py`, so their `from backtest import ...`-style imports resolve). Quantitative-only — none of these change live strategy code unless a result explicitly earns it:
 ```bash
-python backtest_target_matrix.py --timeframe 15m       # target/exit variant comparison (gap 1.0-2.0x, fixed 2R/3R/5R) vs the live baseline, by expectancy + drawdown, not just win rate
-python hmm_regime_ab_experiment.py                      # 2-state vs 3-state HMM cluster quality + outcome relevance
-python hmm_windowed_decode_experiment.py                 # validates the rolling-window regime-decode fix against retrospective ground truth
-python hmm_regime_filter_backtest.py                     # regime-filtered Path 1 A/B (hard/soft filter vs baseline) — result: rejected, see TL;DR
-python hmm_regime_direction_experiment.py                # regime x direction decomposition (Path 2 bear-veto) — 700d yfinance, superseded by the Binance rerun below
-python hmm_regime_direction_binance_experiment.py         # same study, full 2019-2026 Binance history, post-bugfix — see TL;DR (CLOSED)
-python hmm_regime_direction_interaction_analysis.py       # interaction + tail-exceedance follow-up (block bootstrap) — closed the bear-veto question, see TL;DR
-python market_structure_fix_ab_backtest.py                # pre-deploy A/B for the market_structure fix, single-timeframe
-python market_structure_fix_ab_multitimeframe.py          # same A/B, joint multi-timeframe replay (higher fidelity) — see RESEARCH_NOTES.md
-python smc_confidence_matrix_backtest.py                 # respect-count / ATR-relative confidence bonuses vs baseline — result: mixed, not deployed, see TL;DR
-python backtest_stoploss_matrix.py --timeframe 15m       # stop-loss placement variants (wider FVG-anchored, ATR-based) vs baseline — ATR rejected, gap mixed, see TL;DR
-python backtest_momentum_coverage_experiment.py --timeframe 15m   # momentum overlay for SMC/FVG's structural coverage gap — result: rejected 9/9, see TL;DR
+python -m experiments.backtest_target_matrix --timeframe 15m       # target/exit variant comparison (gap 1.0-2.0x, fixed 2R/3R/5R) vs the live baseline, by expectancy + drawdown, not just win rate
+python -m experiments.hmm_regime_ab_experiment                      # 2-state vs 3-state HMM cluster quality + outcome relevance
+python -m experiments.hmm_windowed_decode_experiment                 # validates the rolling-window regime-decode fix against retrospective ground truth
+python -m experiments.hmm_regime_filter_backtest                     # regime-filtered Path 1 A/B (hard/soft filter vs baseline) — result: rejected, see TL;DR
+python -m experiments.hmm_regime_direction_experiment                # regime x direction decomposition (Path 2 bear-veto) — 700d yfinance, superseded by the Binance rerun below
+python -m experiments.hmm_regime_direction_binance_experiment         # same study, full 2019-2026 Binance history, post-bugfix — see TL;DR (CLOSED)
+python -m experiments.hmm_regime_direction_interaction_analysis       # interaction + tail-exceedance follow-up (block bootstrap) — closed the bear-veto question, see TL;DR
+python -m experiments.market_structure_fix_ab_backtest                # pre-deploy A/B for the market_structure fix, single-timeframe
+python -m experiments.market_structure_fix_ab_multitimeframe          # same A/B, joint multi-timeframe replay (higher fidelity) — see RESEARCH_NOTES.md
+python -m experiments.smc_confidence_matrix_backtest                 # respect-count / ATR-relative confidence bonuses vs baseline — result: mixed, not deployed, see TL;DR
+python -m experiments.backtest_stoploss_matrix --timeframe 15m       # stop-loss placement variants (wider FVG-anchored, ATR-based) vs baseline — ATR rejected, gap mixed, see TL;DR
+python -m experiments.backtest_momentum_coverage_experiment --timeframe 15m   # momentum overlay for SMC/FVG's structural coverage gap — result: rejected 9/9, see TL;DR
+python -m experiments.vwap_confluence_ab_experiment --timeframe 1h --days 90       # VWAP directional-confluence veto — result: rejected, see TL;DR
+python -m experiments.ta_full_survey_experiment --phase 1 --timeframe 1h          # screens 10 TA indicators individually before combining any (phase 2)
+python -m experiments.full_ta_robustness_validation --segments 6 --timeframe 1h   # all 11 filters, multi-regime (2yr) — 0 regime-robust, see TL;DR
+python -m experiments.combo_multiregime_robustness --asset crypto --segments 6    # combinations of the best individual filters — still 0 robust
+python -m experiments.standalone_ta_strategies_robustness --segments 6            # SMC/FVG vs 5 classic standalone TA strategies with no SMC involvement
 ```
 
 ---
@@ -520,26 +526,36 @@ This is expected right now — see TL;DR. `TRADE_THRESHOLD=0.55` sits close to t
 TraderStuff/
 ├── main.py                    # Main orchestrator — runs both decision paths + dashboard
 ├── backtest.py                # Historical validation: is/oos, multi-regime, GNN ablation, multi-timeframe concurrency, slippage sweep
-├── backtest_target_matrix.py  # Target/exit variant comparison (Path 1 only) — result: live baseline already optimal
-├── hmm_regime_ab_experiment.py       # 2-state vs 3-state HMM cluster quality + outcome relevance
-├── hmm_windowed_decode_experiment.py # Validates the rolling-window regime-decode fix vs retrospective ground truth
-├── hmm_regime_filter_backtest.py     # Regime-filtered Path 1 A/B — result: rejected, not deployed
-├── hmm_regime_direction_experiment.py # Regime x direction decomposition (Path 2 bear-veto), 700d yfinance — superseded, see below
-├── hmm_regime_direction_binance_experiment.py # Same study, full 2019-2026 Binance history, post-bugfix — see TL;DR (CLOSED)
-├── hmm_regime_direction_interaction_analysis.py # Interaction + tail-exceedance follow-up — closed the bear-veto question
-├── market_structure_fix_ab_backtest.py        # Pre-deploy A/B for the market_structure fix
-├── market_structure_fix_ab_multitimeframe.py  # Same A/B, joint multi-timeframe replay (higher fidelity)
-├── smc_confidence_matrix_backtest.py # SMC confidence-weighting bonuses — result: mixed, not deployed
-├── backtest_stoploss_matrix.py       # Stop-loss placement variants — ATR rejected, wider FVG-anchored mixed, not deployed
-├── backtest_momentum_coverage_experiment.py  # Momentum overlay for SMC/FVG's coverage gap — result: rejected 9/9, not deployed
-├── backtest_htf_bias_experiment.py    # Higher-timeframe bias filter — research candidate, see TL;DR
-├── backtest_concurrence_experiment.py # Timeframe concurrence (observational, crypto) — full_agreement strongest, see Contributing
-├── backtest_signal_age_experiment.py  # Signal age/decay (observational, crypto 15m) — 0-2h weakest, 8-24h strongest, see Contributing
-├── audit_news_coverage.py             # Quantifies news/Macro_Event coverage per symbol (graph state + live funnel snapshot) — found stock has ~0 coverage, see TL;DR
-├── reconcile_downtime.py              # Reconciles paper-ledger open positions against real price history after a shutdown
+├── reconcile_downtime.py      # Reconciles paper-ledger open positions against real price history after a shutdown
 ├── start_system.sh / stop_system.sh   # One-command start/stop for both crypto + stock processes
 ├── train_gnn.py                # GNN training from historical candles (separate checkpoint per ASSET_TYPE)
 ├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
+├── experiments/                # One-off research/validation scripts — quantitative-only, run via `python -m experiments.<name>` (see above)
+│   ├── backtest_target_matrix.py  # Target/exit variant comparison (Path 1 only) — result: live baseline already optimal
+│   ├── hmm_regime_ab_experiment.py       # 2-state vs 3-state HMM cluster quality + outcome relevance
+│   ├── hmm_windowed_decode_experiment.py # Validates the rolling-window regime-decode fix vs retrospective ground truth
+│   ├── hmm_regime_filter_backtest.py     # Regime-filtered Path 1 A/B — result: rejected, not deployed
+│   ├── hmm_regime_direction_experiment.py # Regime x direction decomposition (Path 2 bear-veto), 700d yfinance — superseded, see below
+│   ├── hmm_regime_direction_binance_experiment.py # Same study, full 2019-2026 Binance history, post-bugfix — see TL;DR (CLOSED)
+│   ├── hmm_regime_direction_interaction_analysis.py # Interaction + tail-exceedance follow-up — closed the bear-veto question
+│   ├── market_structure_fix_ab_backtest.py        # Pre-deploy A/B for the market_structure fix
+│   ├── market_structure_fix_ab_multitimeframe.py  # Same A/B, joint multi-timeframe replay (higher fidelity)
+│   ├── smc_confidence_matrix_backtest.py # SMC confidence-weighting bonuses — result: mixed, not deployed
+│   ├── backtest_stoploss_matrix.py       # Stop-loss placement variants — ATR rejected, wider FVG-anchored mixed, not deployed
+│   ├── backtest_momentum_coverage_experiment.py  # Momentum overlay for SMC/FVG's coverage gap — result: rejected 9/9, not deployed
+│   ├── backtest_htf_bias_experiment.py    # Higher-timeframe bias filter — research candidate, see TL;DR
+│   ├── backtest_concurrence_experiment.py # Timeframe concurrence (observational, crypto) — full_agreement strongest, see Contributing
+│   ├── backtest_signal_age_experiment.py  # Signal age/decay (observational, crypto 15m) — 0-2h weakest, 8-24h strongest, see Contributing
+│   ├── backtest_meta_filter_experiment.py # Regime/concurrence/signal-age combined as a meta pre-filter — see RESEARCH_NOTES.md
+│   ├── audit_news_coverage.py             # Quantifies news/Macro_Event coverage per symbol — found stock has ~0 coverage, see TL;DR
+│   ├── ta_indicators.py                   # Shared causal (no-lookahead) indicator library — RSI/MACD/Bollinger/Stochastic/CCI/OBV/Donchian/ADX/ATR series
+│   ├── vwap_confluence_ab_experiment.py   # VWAP directional-confluence veto — result: rejected, see TL;DR
+│   ├── confluence_matrix_ab_experiment.py # EMA/RSI/volume 3-filter combination matrix — see TL;DR
+│   ├── ta_full_survey_experiment.py       # Two-phase screen (10 indicators individually, then combine survivors)
+│   ├── ema50_robustness_validation.py     # EMA50-specific multi-regime/parameter/concentration/significance validation
+│   ├── full_ta_robustness_validation.py   # All 11 filters, multi-regime (2yr, 6 segments) — 0 regime-robust, see TL;DR
+│   ├── combo_multiregime_robustness.py    # Combinations of the best individual filters, same bar — still 0 robust
+│   └── standalone_ta_strategies_robustness.py # SMC/FVG vs 5 classic standalone TA strategies with no SMC involvement — see TL;DR
 ├── config/
 │   └── settings.py            # Configuration (SMC, paper trading, LLM-consensus risk, HMM regime, etc.)
 ├── strategy/
@@ -582,10 +598,11 @@ PRs welcome! Known gaps worth tackling, roughly in order of value:
 - Investigate whether GNN confluence can be made to add real value, or whether SMC/FVG alone is the more honest baseline (see `backtest.py --with-gnn`)
 - A genuinely bigger reward lever than target width — the target/exit matrix closed that door (wider targets are strictly worse); the more promising direction flagged by the regime-filter experiment, and reinforced by HTF bias, is entry *selection* ("which trades should never have been taken"), not exit sizing. Agreed research ordering for pursuing that (external research memo + review, 2026-08-21):
   1. ✅ **Persist rejection reasons historically** — done and live. Every rejection (fee-too-tight, correlation-cap, stale-signal) is now appended to a bounded history file instead of being overwritten every cycle. Pure infrastructure — decision path provably unchanged (`tests/test_rejection_history.py`). See `RESEARCH_NOTES.md` for detail.
-  2. ✅ **Timeframe concurrence, crypto first — research candidate, not deployed.** Purely observational — full agreement across 5m/15m/1h showed the strongest, most consistent performance; full conflict stayed profitable but with much higher drawdown. See `backtest_concurrence_experiment.py`, detail in `RESEARCH_NOTES.md`.
-  3. ✅ **Signal age/decay, crypto 15m — research candidate, stronger than step 2, not yet a strategy finding.** Found and fixed a real backtest-fidelity bug first (see bug-history above). 0-2h old zones consistently worst, 8-24h consistently strongest — deliberately not called "decay" or "older is better," since persistence/survivorship/regime confounds aren't yet separated. See `backtest_signal_age_experiment.py`, detail in `RESEARCH_NOTES.md`.
+  2. ✅ **Timeframe concurrence, crypto first — research candidate, not deployed.** Purely observational — full agreement across 5m/15m/1h showed the strongest, most consistent performance; full conflict stayed profitable but with much higher drawdown. See `experiments/backtest_concurrence_experiment.py`, detail in `RESEARCH_NOTES.md`.
+  3. ✅ **Signal age/decay, crypto 15m — research candidate, stronger than step 2, not yet a strategy finding.** Found and fixed a real backtest-fidelity bug first (see bug-history above). 0-2h old zones consistently worst, 8-24h consistently strongest — deliberately not called "decay" or "older is better," since persistence/survivorship/regime confounds aren't yet separated. See `experiments/backtest_signal_age_experiment.py`, detail in `RESEARCH_NOTES.md`.
   4. **Only after both reveal repeated mechanics, extract shared experiment infrastructure** — not a generic harness built speculatively in advance of having two real experiments to generalize from (that would repeat the premature-abstraction mistake in miniature).
-  5. **Then** index/sector context, then the company/macro/sector news program (`audit_news_coverage.py` already quantified the stock gap at 0 live mentions — see TL;DR; treat "news coverage" and "macro-event coverage" as separate axes, ablation ladder baseline → +company → +macro → +sector → combinations, scored on trade *selection* changes not just aggregate P&L). Re-test GNN's "negligible contribution" finding only after the stock graph is actually populated — that finding was measured against crypto's much denser graph, not stock's, so it doesn't automatically transfer.
+  5. **Then** index/sector context, then the company/macro/sector news program (`experiments/audit_news_coverage.py` already quantified the stock gap at 0 live mentions — see TL;DR; treat "news coverage" and "macro-event coverage" as separate axes, ablation ladder baseline → +company → +macro → +sector → combinations, scored on trade *selection* changes not just aggregate P&L). Re-test GNN's "negligible contribution" finding only after the stock graph is actually populated — that finding was measured against crypto's much denser graph, not stock's, so it doesn't automatically transfer.
+  6. ✅ **Full TA confluence-filter survey — CLOSED.** 11 filters (every major category), their combinations, and 5 standalone non-SMC strategies, all tested across a full 2-year/6-regime bar — none beat baseline; standalone strategies lose money outright. Strongest evidence yet the SMC/FVG structural approach itself is the edge, not a filterable input to it. See `experiments/full_ta_robustness_validation.py`, `experiments/standalone_ta_strategies_robustness.py`, detail in `RESEARCH_NOTES.md`.
   Standing rule for all of the above: **crypto establishes or disproves the hypothesis; stock only tests whether it transfers** — prevents the thinner stock dataset from becoming the accidental discovery environment.
 - Local/self-hosted LLM option for Path 2's debate (feasible via an OpenAI-compatible local server; tradeoff is reasoning quality vs. removing the API dependency)
 - Multi-exchange arbitrage
