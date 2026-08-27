@@ -12,14 +12,26 @@
 # notices. Refuses to start if either process already appears to be
 # running, to avoid a double-launch (duplicate trading, port conflicts).
 #
+# Detects an already-running instance via PowerShell/WMI, not `ps` -- `ps`'s
+# PID numbering is scoped to the specific MSYS/Git-Bash runtime that spawned
+# a process, so a different bash session (or even a different Git Bash
+# window) can't reliably see a process another session started, and not
+# every MSYS ps build even supports the Windows-wide `-W` flag (found live,
+# 2026-08-27, see stop_system.sh's header for the full story). PowerShell's
+# WMI query returns the real Windows PID and works identically regardless
+# of which shell calls it.
+#
 # Usage: bash start_system.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-existing=$(ps aux | grep -i "\.venv/Scripts/python" | grep -v grep || true)
+find_pids() {
+  powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { \$_.CommandLine -like '*TraderStuff*main.py*' } | Select-Object -ExpandProperty ProcessId" | tr -d '\r' | grep -v '^$' || true
+}
+
+existing=$(find_pids)
 if [ -n "$existing" ]; then
-  echo "Refusing to start: a TraderStuff process already appears to be running:"
-  echo "$existing"
+  echo "Refusing to start: a TraderStuff process already appears to be running (PID(s): $(echo $existing | tr '\n' ' '))."
   echo "Run stop_system.sh first if you want to restart."
   exit 1
 fi
@@ -48,11 +60,18 @@ stock_pid=$!
 sleep 5
 echo ""
 echo "=== Process check ==="
-ps aux | grep -i "\.venv/Scripts/python" | grep -v grep || echo "WARNING: no processes found -- something failed to start, check the log files"
+new_pids=$(find_pids)
+if [ -n "$new_pids" ]; then
+  echo "Running (PID(s): $(echo $new_pids | tr '\n' ' '))"
+else
+  echo "WARNING: no processes found -- something failed to start, check the log files"
+fi
 
 echo ""
-echo "Launched (shell job PIDs $crypto_pid / $stock_pid -- these will differ from"
-echo "the actual python process PIDs shown above under a git-bash/MSYS shell)."
+echo "Launched (shell job PIDs $crypto_pid / $stock_pid -- these are this shell's"
+echo "own bookkeeping and will differ from the real Windows PIDs shown above)."
+echo "Use stop_system.sh to stop -- it finds the real processes the same way"
+echo "regardless of which terminal/session you run it from."
 echo "Both processes take 1-2 minutes to finish backfilling before they're fully live."
 echo "Tail the logs to watch startup: tail -f backtrack_logs/main_run.log"
 echo "                                 tail -f backtrack_logs/main_run_stock_yfinance.log"
