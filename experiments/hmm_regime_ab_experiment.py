@@ -45,7 +45,7 @@ import yfinance as yf
 from hmmlearn import hmm
 
 from backtest import CRYPTO_TICKERS, fetch_candles
-from backtest_target_matrix import _make_variant, replay_variant
+from .backtest_target_matrix import _make_variant, replay_variant
 
 DAYS = 180  # 1h benchmark history window
 
