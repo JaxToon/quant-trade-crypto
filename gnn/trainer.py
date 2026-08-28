@@ -58,8 +58,23 @@ class GNNTrainer:
         # Store the edge types this model was built with — new NLP-discovered
         # edge types added later to Neo4j must be filtered out at inference time
         # to avoid HGTConv KeyError. Rebuild model to incorporate new types.
+        #
+        # Excludes types with a genuinely empty (zero-edge) tensor, even
+        # though build_hetero_data() now always populates all canonical
+        # types (gnn/dataset.py's EDGE_TYPES) so the MODEL's own parameter
+        # shape (from HGTSignalModel(metadata=data.metadata(), ...) above,
+        # which sees every canonical type) stays stable across retrains
+        # regardless of which types currently have real edges -- fixing the
+        # root cause of a real incompatible-checkpoint incident (crypto,
+        # 2026-08-27 23:20) caused by a type going fully edge-less mid
+        # pruning-cycle. But routing an actually-empty [2,0] edge_index
+        # through HGTConv's forward pass crashes it (KeyError building the
+        # per-relation key/value projection for a source type with no
+        # edges) -- so forward calls (this init pass and all real
+        # inference/training) must still only see non-empty types.
         self._known_edge_types: set[tuple] = set(
-            et for et in data.edge_types if hasattr(data[et], "edge_index")
+            et for et in data.edge_types
+            if hasattr(data[et], "edge_index") and data[et].edge_index.shape[1] > 0
         )
 
         # Lazy Linear(-1, ...) layers need one forward pass to initialize weights
