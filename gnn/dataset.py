@@ -171,4 +171,25 @@ def build_hetero_data(asset_type: str | None = None) -> tuple[HeteroData, dict[s
         data[src_type, rel, dst_type].edge_index = torch.tensor([srcs, dsts], dtype=torch.long)
         data[src_type, rel, dst_type].edge_attr = torch.tensor(confs, dtype=torch.float).unsqueeze(1)
 
+    # Always populate EVERY canonical edge type, even ones with zero real
+    # edges right now (empty [2,0] tensor) -- gnn/trainer.py's build_model()
+    # derives the model's relation-type parameter count directly from
+    # whichever edge types happen to be present on this HeteroData object
+    # (data.edge_types). Before this, a type that transiently had zero
+    # edges (e.g. after the daily Macro_Event/edge pruning job removed the
+    # last SUPPLIES or REGULATES edge) was simply absent, so a retrain right
+    # after that produced a model with FEWER relation types than one trained
+    # while that type still had edges -- an architecture mismatch, not a
+    # real checkpoint corruption. Confirmed as the actual root cause of a
+    # live incompatible-checkpoint incident (crypto, 2026-08-27 23:20) after
+    # a continual-learning save landed mid-pruning-cycle. Present-but-empty
+    # for a currently-edgeless type keeps the architecture stable across
+    # every retrain regardless of the graph's current edge-type mix.
+    for src_type, rel, dst_type in EDGE_TYPES:
+        key = (src_type, rel, dst_type)
+        if key in edge_buckets and edge_buckets[key][0]:
+            continue
+        data[src_type, rel, dst_type].edge_index = torch.empty((2, 0), dtype=torch.long)
+        data[src_type, rel, dst_type].edge_attr = torch.empty((0, 1), dtype=torch.float)
+
     return data, index_maps

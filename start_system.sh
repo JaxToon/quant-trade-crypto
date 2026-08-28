@@ -40,15 +40,18 @@ echo "=== Reconciling downtime (if any open positions exist from before) ==="
 .venv/Scripts/python reconcile_downtime.py --asset-type both || echo "(reconcile_downtime.py exited non-zero -- check output above; continuing to start anyway)"
 
 echo ""
-echo "=== Starting crypto process (PORTFOLIO_MAX_CORRELATED_RISK_PCT=0.12, see RESEARCH_NOTES.md) ==="
-# Raised from the 0.08 default for crypto only -- backtest evidence (2026-08-27,
-# RESEARCH_NOTES.md "Directional sizing" + "Correlation cap vs short sizing"):
-# 2yr/6-regime backtest showed +65% return with max drawdown slightly BETTER
-# than default (26.7% vs 28.1%). Stock's own backtest showed the same cap
-# increase is NOT a free improvement there (drawdown +24% relative worse) --
-# deliberately NOT set on the stock process below, which falls through to
-# .env's 0.08 default instead.
-PORTFOLIO_MAX_CORRELATED_RISK_PCT=0.12 nohup .venv/Scripts/python -u main.py >> backtrack_logs/main_run.log 2>&1 &
+echo "=== Starting crypto process (default risk cap 0.08 -- see RESEARCH_NOTES.md) ==="
+# Was raised to 0.12 on 2026-08-27 night (backtest evidence: +65% return,
+# drawdown slightly BETTER than default). Reverted back to the 0.08 default
+# on 2026-08-28 pending a live/backtest discrepancy on SHORT trade quality:
+# live crypto shorts underperformed backtest replay of the identical window
+# dramatically (30% vs 61% WR), and the cap increase's own mechanism (more
+# correlated exposure gets through, including more shorts) risked amplifying
+# that unresolved problem rather than helping. Revisit once the newly
+# retrained GNN checkpoint's live short performance is actually observed --
+# see RESEARCH_NOTES.md "Live evidence vs backtest" and the GNN-checkpoint
+# entries for the full arc.
+nohup .venv/Scripts/python -u main.py >> backtrack_logs/main_run.log 2>&1 &
 disown
 crypto_pid=$!
 
