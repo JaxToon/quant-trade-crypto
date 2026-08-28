@@ -88,6 +88,27 @@ persists automatically on Neo4j's side — no volume to manage yourself):
    needed, though you'll lose whatever edges accumulated in your old local
    graph unless you export it first (`neo4j-admin database dump`).
 
+## Neo4j: currently local Neo4j Desktop, not Docker (2026-08-28)
+
+`NEO4J_URI` points at `neo4j://127.0.0.1:7687`, the user's native Neo4j
+Desktop instance — switched off a Docker container (`neo4j-trader`) after
+Docker Desktop's own reliability (crashes, "manually paused" states,
+especially after laptop sleep) was the dominant operational failure mode
+for weeks. The switch was a straightforward MERGE-keyed migration (no
+`neo4j-admin dump/load` needed — that risks Neo4j edition/version
+mismatches between a Docker image and a Desktop install; a plain Cypher
+read-from-source/MERGE-into-target script is more portable and was used
+instead) and lost nothing — Docker's own data turned out to be a
+strict-ish subset of what local already had from an earlier period
+before something switched the live system onto Docker.
+
+Practical consequence for the recovery scripts: `start_system.sh`/
+`stop_system.sh` no longer have a Docker fallback for Neo4j at all — if
+the local Desktop DBMS isn't running, there's no CLI way to start it (it's
+a GUI app), so a monitoring loop can only flag "Neo4j unreachable, start
+it manually" rather than self-heal the way it could restart Docker
+Desktop's process.
+
 ## When you do pick a host
 
 Whatever you choose (VPS, Fly.io, Railway, home server, etc.), the hard
