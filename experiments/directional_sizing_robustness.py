@@ -25,9 +25,17 @@ same 6-segment/~2yr lockstep engine as every other robustness pass today:
                     on shorts rather than banning them. Tests a softer,
                     de-risk-not-ban form.
 
-Usage: python -m experiments.directional_sizing_robustness [--segments N] [--days N] [--timeframe 1h]
+Usage: python -m experiments.directional_sizing_robustness [--segments N] [--days N] [--timeframe 1h] [--with-gnn]
 Run once per asset type (default settings.ASSET_TYPE, and again with
-ASSET_TYPE=stock in the environment).
+ASSET_TYPE=stock in the environment). --with-gnn layers in the real,
+current trained checkpoint's point-in-time signal (backtest.py's pattern)
+instead of gnn_signal=0.0 for every step -- use this to re-check the
+SHORT-viability question against the actual current model, since every
+run of this script before 2026-08-29 (including the original 38%-live-WR
+motivation above) used gnn_signal=0.0 for methodological consistency with
+the other robustness passes, which meant it never actually reflected
+whatever GNN state (fresh, stale, or the corrupted checkpoint window --
+see RESEARCH_NOTES.md) was live at any given time.
 """
 from __future__ import annotations
 
@@ -63,7 +71,14 @@ def apply_variant(insight: dict, name: str) -> dict:
     return result
 
 
-def run_segment(symbols_candles: dict[str, list[Candle]], timeframe: str, label: str) -> dict[str, dict]:
+def run_segment(symbols_candles: dict[str, list[Candle]], timeframe: str, label: str, trainer=None) -> dict[str, dict]:
+    """
+    trainer: optional GNNTrainer (already .load()'ed). If given, every step
+    recomputes the same 18-dim TOKEN_FEATURES-order vector backtest.py's
+    replay_lockstep uses and does a joint predict_from_features() call
+    across all symbols, so entry_insight sees a real point-in-time GNN
+    signal instead of the gnn_signal=0.0 used everywhere else this session.
+    """
     arm_names = ["BASELINE"] + VARIANT_NAMES
     ledgers = {}
     for name in arm_names:
@@ -75,11 +90,19 @@ def run_segment(symbols_candles: dict[str, list[Candle]], timeframe: str, label:
 
     smc_by_symbol = {sym: SmartMoneyAnalyzer(lookback=settings.SMC_LOOKBACK_CANDLES) for sym in symbols_candles}
     fvg_by_symbol = {sym: FairValueGapAnalyzer(max_fvgs=50, cluster_proximity=0.02) for sym in symbols_candles}
+    closes_by_symbol: dict[str, list[float]] = {sym: [] for sym in symbols_candles}
+
+    if trainer is not None:
+        from train_gnn import _rsi, _macd, _bollinger, _encode_market_structure  # local: keeps the no-GNN path torch-free
 
     min_len = min((len(c) for c in symbols_candles.values()), default=0)
     for t in range(min_len):
+        step_candles: dict[str, Candle] = {}
+        smc_context_by_symbol: dict[str, dict] = {}
+
         for sym, candles in symbols_candles.items():
             candle = candles[t]
+            step_candles[sym] = candle
             smc, fvg = smc_by_symbol[sym], fvg_by_symbol[sym]
             smc_signals = smc.update(candle)
             candle_hist = list(smc.candles)
@@ -88,9 +111,42 @@ def run_segment(symbols_candles: dict[str, list[Candle]], timeframe: str, label:
             fvg.update_all(candle.close)
             ms_trend = smc_signals.get("market_structure", "unknown")
             fvg_signal = fvg.get_trading_signal(current_price=candle.close, trend=ms_trend)
-            smc_context = {**smc_signals, **fvg_signal, "timestamp": candle.timestamp.isoformat()}
+            smc_context_by_symbol[sym] = {**smc_signals, **fvg_signal, "timestamp": candle.timestamp.isoformat()}
+            if trainer is not None:
+                closes_by_symbol[sym].append(candle.close)
 
-            insight = build_entry_insight(sym, candle.close, smc_context, gnn_signal=0.0)
+        if trainer is not None:
+            # Same 18-dim feature vector (TOKEN_FEATURES order) as
+            # backtest.py's replay_lockstep — a joint forward pass across
+            # all Token nodes since the GNN message-passes over all of them
+            # at once.
+            features: dict[str, list[float]] = {}
+            for sym, candle in step_candles.items():
+                closes = closes_by_symbol[sym]
+                rsi = _rsi(closes)
+                macd, macd_signal, macd_hist = _macd(closes)
+                bb_upper, bb_mid, bb_lower = _bollinger(closes)
+                smc_signals = smc_context_by_symbol[sym]
+                tech = [candle.close, candle.volume, rsi, macd, macd_signal, macd_hist, bb_upper, bb_mid, bb_lower]
+                smc_feats = [
+                    smc_signals.get("smc_signal", 0.0),
+                    _encode_market_structure(smc_signals.get("market_structure", "unknown")),
+                    float(smc_signals.get("active_order_blocks", 0)),
+                    float(smc_signals.get("active_fvgs", 0)),
+                    float(smc_signals.get("liquidity_zones", 0)),
+                    1.0 if smc_signals.get("in_bullish_ob") else 0.0,
+                    1.0 if smc_signals.get("in_bearish_ob") else 0.0,
+                    1.0 if smc_signals.get("in_bullish_fvg") else 0.0,
+                    1.0 if smc_signals.get("in_bearish_fvg") else 0.0,
+                ]
+                features[sym] = tech + smc_feats
+            gnn_signals = trainer.predict_from_features(features)
+        else:
+            gnn_signals = {sym: 0.0 for sym in step_candles}
+
+        for sym, candle in step_candles.items():
+            smc_context = smc_context_by_symbol[sym]
+            insight = build_entry_insight(sym, candle.close, smc_context, gnn_signal=gnn_signals.get(sym, 0.0))
             opened_at = candle.timestamp.isoformat()
 
             ledgers["BASELINE"].check_and_close_ohlc(sym, candle.low, candle.high, closed_at=opened_at, timeframe=timeframe)
@@ -116,10 +172,23 @@ def main() -> None:
     parser.add_argument("--segments", type=int, default=6)
     parser.add_argument("--days", type=int, default=None)
     parser.add_argument("--timeframe", default="1h")
+    parser.add_argument("--with-gnn", action="store_true",
+                         help="Layer in the real, current trained GNN checkpoint's point-in-time signal "
+                              "(same pattern as backtest.py) instead of gnn_signal=0.0 for every step.")
     args = parser.parse_args()
     timeframe = args.timeframe
     max_days = YF_MAX_DAYS.get(timeframe, 730)
     days = min(args.days if args.days is not None else max_days, max_days)
+
+    trainer = None
+    if args.with_gnn:
+        from gnn.trainer import GNNTrainer
+        trainer = GNNTrainer()
+        if not trainer.load():
+            print(f"No trained GNN checkpoint found for ASSET_TYPE={settings.ASSET_TYPE} — "
+                  "run train_gnn.py first. Aborting --with-gnn run.")
+            return
+        print(f"Loaded GNN checkpoint for ASSET_TYPE={settings.ASSET_TYPE} — real point-in-time signal active.\n")
 
     print(f"ASSET_TYPE={settings.ASSET_TYPE} — {len(settings.WATCHLIST)} symbols: {settings.WATCHLIST}")
     print(f"Fetching {days}d of {timeframe} candles (via yfinance, max available)...\n")
@@ -151,7 +220,7 @@ def main() -> None:
     total_baseline_pnl = 0.0
 
     for i, seg in enumerate(segments):
-        results = run_segment(seg, timeframe, f"seg{i}")
+        results = run_segment(seg, timeframe, f"seg{i}", trainer=trainer)
         base_pnl = results["BASELINE"]["overall"]["total_pnl_dollars"]
         base_wr = results["BASELINE"]["overall"]["win_rate_pct"]
         total_baseline_pnl += base_pnl
