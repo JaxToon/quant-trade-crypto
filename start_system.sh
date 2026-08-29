@@ -51,12 +51,17 @@ echo "=== Starting crypto process (default risk cap 0.08 -- see RESEARCH_NOTES.m
 # retrained GNN checkpoint's live short performance is actually observed --
 # see RESEARCH_NOTES.md "Live evidence vs backtest" and the GNN-checkpoint
 # entries for the full arc.
-nohup .venv/Scripts/python -u main.py >> backtrack_logs/main_run.log 2>&1 &
+# Path 2 (LLM debate) disabled by default since 2026-08-30 -- 3,050+
+# recorded debate decisions across this project's history, zero ever
+# executed a trade, but each cycle still burned 3 OpenAI calls/symbol.
+# Path 1 (SMC/FVG paper trading) is untouched by this. See settings.py
+# and RESEARCH_NOTES.md. Set ENABLE_LLM_CONSENSUS=true here to re-enable.
+ENABLE_LLM_CONSENSUS=false nohup .venv/Scripts/python -u main.py >> backtrack_logs/main_run.log 2>&1 &
 disown
 crypto_pid=$!
 
-echo "=== Starting stock process (ASSET_TYPE=stock MARKET_SOURCE=yfinance, default risk cap) ==="
-ASSET_TYPE=stock MARKET_SOURCE=yfinance nohup .venv/Scripts/python -u main.py >> backtrack_logs/main_run_stock_yfinance.log 2>&1 &
+echo "=== Starting stock process (ASSET_TYPE=stock MARKET_SOURCE=yfinance, default risk cap, LLM consensus disabled) ==="
+ENABLE_LLM_CONSENSUS=false ASSET_TYPE=stock MARKET_SOURCE=yfinance nohup .venv/Scripts/python -u main.py >> backtrack_logs/main_run_stock_yfinance.log 2>&1 &
 disown
 stock_pid=$!
 

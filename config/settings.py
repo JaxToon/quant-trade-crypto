@@ -44,6 +44,14 @@ TRADINGVIEW_INTERVAL = os.getenv("TRADINGVIEW_INTERVAL", "1m")  # 1m, 5m, 15m, 1
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 BULL_BEAR_MODEL = "gpt-4o-mini"   # fast + cheap for debaters
 CRITIC_MODEL = "gpt-4o"           # deeper reasoning for critic
+# Path 2 (Bull/Bear/Critic debate -> Binance testnet) kill switch. Default
+# on to preserve existing behavior; set to "false" to skip the whole debate
+# cycle in main.py's decision_loop (saves OpenAI credits) while leaving
+# Path 1 (SMC/FVG paper trading) and open-position monitoring untouched.
+# Disabled 2026-08-30: 3,050+ recorded debate decisions (1,050 crypto +
+# 2,000 stock) across this project's history, zero ever executed a trade
+# -- see RESEARCH_NOTES.md.
+ENABLE_LLM_CONSENSUS = os.getenv("ENABLE_LLM_CONSENSUS", "true").lower() == "true"
 
 # ── Trading risk parameters ────────────────────────────────────────────────
 TRADE_THRESHOLD = 0.55      # minimum P(Trade) to open a position

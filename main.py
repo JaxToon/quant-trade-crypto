@@ -528,6 +528,13 @@ def decision_loop(
     signals = gnn.predict_all()
     _write_status(circuit, signals)
 
+    # Path 2 kill switch (ENABLE_LLM_CONSENSUS=false) -- skips the whole
+    # debate cycle (saves OpenAI credits) but still monitors any existing
+    # open testnet positions. See settings.py for why this was disabled.
+    if not settings.ENABLE_LLM_CONSENSUS:
+        execution.monitor_positions()
+        return
+
     # Skip all LLM debate when bear veto is fully active — saves OpenAI credits
     if circuit.bear_veto_active:
         logger.info("Bear veto active (%s) — skipping debate cycle.", circuit.regime_label)
