@@ -19,3 +19,4 @@ dashboard/rejection_history*.json
 dashboard/candidate_trades*.json
 dashboard/candidate_dataset*.json
 RESEARCH_NOTES.md
+data/stock_ohlcv_1m/
