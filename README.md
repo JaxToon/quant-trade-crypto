@@ -453,6 +453,45 @@ Reads real *closed, losing* trades from Neo4j (Path 2 only — the LLM-consensus
 
 ## 📈 Performance & Monitoring
 
+### ⚠️ Execution cost is the binding constraint — read before trusting any backtest
+
+Measured 2026-09-04 (`experiments/breakeven_under_slippage.py`, 730d /
+6 segments / 1h, full write-up in `RESEARCH_NOTES.md`).
+
+A breached stop becomes a **market order** and fills past its trigger. On
+4 real live SHORT stop-outs that overshoot was **0.25-0.60%**. The
+backtest priced it at zero. Charging it to stop exits only (targets are
+limit orders and don't slip adversely) gives:
+
+| Stop slippage | Baseline total PnL | Worst-segment DD |
+|---|---|---|
+| 0.00% | +$288,902 | 55.0% |
+| 0.25% | +$148,114 | 85.3% |
+| 0.40% | +$63,640 | **116.9%** |
+| 0.60% | −$48,991 | 253.4% |
+
+**The strategy crosses into loss at roughly 0.51% slippage — inside the
+band we have already measured.** Worse, a worst-segment drawdown above
+100% means the account went past zero: at 0.40% the baseline suffers
+**ruin in at least one of the six segments** despite positive total PnL.
+
+Consequences for how this repo should be used:
+
+- **Backtest PnL run at `stop_slippage_pct=0.0` is not a viability
+  estimate.** Any new candidate must clear the 0.40% gate before it is
+  considered real. The breakeven-stop rule looked like +78% at 0% and was
+  rejected outright at 0.40%.
+- Use `stop_slippage_pct` (stop exits only), **not** the symmetric
+  `slippage_pct`, whenever a change alters the mix of stop vs target
+  exits — a flat rate taxes target exits too and flatters exactly the
+  rule under test.
+- **Known gap:** `check_and_close` records `exit_price = effective_stop`,
+  the theoretical level, not the price actually polled when the breach was
+  detected. Live results therefore report this cost as invisible too.
+  Close this before judging live viability.
+- Reducing slippage (limit-based stop handling, liquidity-aware sizing)
+  now outranks every signal-side improvement measured in this project.
+
 ### Logs
 
 - `trader.log`: Main system log, accumulates across restarts (append mode) — the reliable source for "what happened since the system started," unlike...
