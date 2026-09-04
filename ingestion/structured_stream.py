@@ -12,10 +12,34 @@ from datetime import datetime
 from typing import Callable
 
 from binance import AsyncClient, BinanceSocketManager
+from binance.exceptions import (
+    BinanceWebsocketClosed,
+    BinanceWebsocketQueueOverflow,
+    BinanceWebsocketUnableToConnect,
+    ReadLoopClosed,
+)
 from config import settings
 from graph.neo4j_client import Neo4jClient
 
 logger = logging.getLogger(__name__)
+
+# A dropped WebSocket read loop (network blip, exchange-side reset, etc.) used
+# to propagate all the way out of start() and kill the whole process -- a
+# real incident (2026-09-02, ReadLoopClosed) took down live trading with no
+# error recovery until a manual restart. These are the exceptions python-
+# binance raises for a dead/unusable socket connection specifically (not
+# generic errors we'd want to keep crashing on) -- caught below and retried
+# with capped exponential backoff instead of exiting.
+_RECONNECTABLE_EXCEPTIONS = (
+    ReadLoopClosed,
+    BinanceWebsocketClosed,
+    BinanceWebsocketQueueOverflow,
+    BinanceWebsocketUnableToConnect,
+    ConnectionError,
+    OSError,
+)
+RECONNECT_INITIAL_DELAY_SECONDS = 2
+RECONNECT_MAX_DELAY_SECONDS = 60
 
 
 # ── Technical indicator calculators ───────────────────────────────────────
@@ -121,13 +145,28 @@ class StructuredStream:
         # different timeframes.
         timeframes = settings.BINANCE_SMC_TIMEFRAMES
         streams = [f"{sym.lower()}@kline_{tf}" for sym in settings.WATCHLIST for tf in timeframes]
-        async with self._bm.multiplex_socket(streams) as msock:
-            logger.info("Binance kline streams open %s: %s", timeframes, settings.WATCHLIST)
-            while True:
-                msg = await msock.recv()
-                if msg is None:
-                    break
-                await self._handle(msg)
+
+        delay = RECONNECT_INITIAL_DELAY_SECONDS
+        while True:
+            try:
+                async with self._bm.multiplex_socket(streams) as msock:
+                    logger.info("Binance kline streams open %s: %s", timeframes, settings.WATCHLIST)
+                    delay = RECONNECT_INITIAL_DELAY_SECONDS  # reset backoff once a connection actually opens
+                    while True:
+                        msg = await msock.recv()
+                        if msg is None:
+                            break
+                        await self._handle(msg)
+                # A clean break (msg is None) still means the socket ended --
+                # reconnect rather than returning, same as the exception path.
+                logger.warning("Binance kline stream ended (msg=None) — reconnecting in %ds", delay)
+            except _RECONNECTABLE_EXCEPTIONS as exc:
+                logger.warning(
+                    "Binance kline stream dropped (%s: %s) — reconnecting in %ds",
+                    type(exc).__name__, exc, delay,
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, RECONNECT_MAX_DELAY_SECONDS)
 
     async def _handle(self, msg: dict) -> None:
         if msg.get("e") == "error":

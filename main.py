@@ -78,6 +78,18 @@ from strategy.execution import ExecutionEngine
 # (settings.BINANCE_SMC_TIMEFRAMES), so ticks from 5m/15m/1h streams for the
 # same symbol must not overwrite each other under one key.
 _latest_indicators: dict[tuple[str, str], dict] = {}
+# Same shape, but only ever updated from a CLOSED candle (kline_closed=True)
+# -- entry decisions read from this one, not _latest_indicators, so a new
+# position is never opened off a still-forming candle's peek_signals() read
+# (SmartMoneyAnalyzer.peek_signals recomputes confidence/direction against
+# whatever price the market happens to be at THIS tick, which can swing and
+# revert before the candle actually closes -- backtest.py's replay never
+# sees that state at all, it only ever evaluates once per closed candle).
+# _latest_indicators itself is untouched and keeps updating every tick --
+# SL/TP monitoring (_current_prices -> check_and_close) SHOULD react to
+# real-time price, that part was always correct. See RESEARCH_NOTES.md
+# "Live SHORT quality gap" for the forensics that led here.
+_latest_closed_indicators: dict[tuple[str, str], dict] = {}
 _shutdown = threading.Event()
 _paper_ledger = PaperTradingLedger() if settings.PAPER_TRADING_ENABLED else None
 
@@ -351,9 +363,13 @@ def _validate_config() -> None:
 # ── Decision loop (runs every 60 seconds) ────────────────────────────────
 
 def _build_entry_insights(gnn_signals: dict) -> dict:
-    """Returns {"SYMBOL_timeframe": insight} — one entry per (symbol, layer)."""
+    """Returns {"SYMBOL_timeframe": insight} — one entry per (symbol, layer).
+
+    Reads _latest_closed_indicators (closed candles only), not
+    _latest_indicators (every tick) -- see that global's own comment for why.
+    """
     insights = {}
-    for (symbol, tf), indicators in _latest_indicators.items():
+    for (symbol, tf), indicators in _latest_closed_indicators.items():
         try:
             price = indicators.get("price", 0.0)
             insight = build_entry_insight(
@@ -429,7 +445,7 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
             # the production system would have become eligible to act"
             # rather than every idle no-signal tick, or every repeat cycle
             # an already-open position's zone happens to still be actionable.
-            smc_raw = _latest_indicators.get((symbol, tf), {}).get("smc", {})
+            smc_raw = _latest_closed_indicators.get((symbol, tf), {}).get("smc", {})
             if spot.get("actionable") and not spot_already_open:
                 _record_candidate(symbol, tf, "spot", spot, smc_raw,
                                    "rejected" if spot_reason else "accepted", spot_reason,
@@ -545,7 +561,8 @@ def decision_loop(
         # LLM-consensus execution stays on the primary timeframe only — the
         # multi-timeframe layers (15m/1h) feed entry_insight/paper trading,
         # not this real-testnet-order path, which shouldn't change behavior.
-        indicators = _latest_indicators.get((symbol, settings.BINANCE_KLINE_INTERVAL), {})
+        # Closed-candle only, same reasoning as _build_entry_insights.
+        indicators = _latest_closed_indicators.get((symbol, settings.BINANCE_KLINE_INTERVAL), {})
         if not indicators:
             logger.debug("%s: no indicators yet, skipping.", symbol)
             continue
@@ -580,6 +597,8 @@ def decision_loop(
 def on_tick(symbol: str, indicators: dict) -> None:
     tf = indicators.get("interval", settings.BINANCE_KLINE_INTERVAL)
     _latest_indicators[(symbol, tf)] = indicators
+    if indicators.get("kline_closed", False):
+        _latest_closed_indicators[(symbol, tf)] = indicators
 
 
 def _start_dashboard() -> None:
