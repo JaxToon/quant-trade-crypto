@@ -73,6 +73,7 @@ class PaperTradingLedger:
 
     def __init__(
         self, path: str | None = None, starting_balance: float | None = None, slippage_pct: float = 0.0,
+        stop_slippage_pct: float = 0.0,
     ) -> None:
         # Separate file per asset class — crypto and stock win rates are
         # different markets and shouldn't be averaged into one stat.
@@ -85,6 +86,30 @@ class PaperTradingLedger:
         # the backtested edge stops being profitable, since neither the
         # live ledger nor the backtest otherwise model real order-book depth.
         self.slippage_pct = slippage_pct
+        # ADDITIONAL adverse slippage applied ONLY to stop-type exits (stop
+        # loss, trailing stop, liquidation) — never to target exits.
+        #
+        # `slippage_pct` above is symmetric across every fill, which quietly
+        # misprices any rule that changes the MIX of exit types, because the
+        # two exit types do not slip alike in reality:
+        #   - a stop becomes a MARKET order the moment it is breached, so it
+        #     fills past the trigger. Measured on 4 real live SHORT stop-outs
+        #     (2026-09-03): 0.25-0.60% beyond the recorded stop.
+        #   - a target is a LIMIT order, which fills at its price or better
+        #     and never slips adversely.
+        # Modelling both at one flat rate therefore under-penalises exactly
+        # the strategies that convert target exits into stop exits (breakeven
+        # and trailing rules), which is the comparison this exists to keep
+        # honest. 0.0 by default: live and every existing backtest behave
+        # exactly as before unless a caller opts in.
+        #
+        # Still NOT modelled, in the opposite direction: target exits are
+        # assumed to fill whenever the candle merely touches them, so a
+        # limit order grazed for one tick is counted as filled. That optimism
+        # favours whichever arm takes more target exits (usually the
+        # baseline), so a rule that wins despite stop slippage is winning
+        # against an already-flattered comparison.
+        self.stop_slippage_pct = stop_slippage_pct
         self.open_positions: dict[tuple[str, str, str], PaperPosition] = {}
         self.closed_trades: list[dict] = []
         self.last_learned_count = 0  # index into closed_trades already used for GNN updates
@@ -361,7 +386,8 @@ class PaperTradingLedger:
             if pos.liquidation_price is not None:
                 hit_liq = price <= pos.liquidation_price if pos.direction == "long" else price >= pos.liquidation_price
                 if hit_liq:
-                    self._close(key, pos, pos.liquidation_price, "loss", closed_at=None, liquidated=True)
+                    self._close(key, pos, pos.liquidation_price, "loss", closed_at=None, liquidated=True,
+                                exit_type="liquidation")
                     continue
 
             self._maybe_update_trailing_stop(pos, price)
@@ -374,7 +400,8 @@ class PaperTradingLedger:
 
             if hit_sl or hit_tp:
                 exit_price = effective_stop if hit_sl else pos.target
-                self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=None)
+                self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=None,
+                            exit_type="stop" if hit_sl else "target")
 
     def check_and_close_ohlc(self, symbol: str, low: float, high: float, closed_at: str, timeframe: str | None = None) -> None:
         """
@@ -404,7 +431,8 @@ class PaperTradingLedger:
                 if pos.liquidation_price is not None:
                     hit_liq = low <= pos.liquidation_price if pos.direction == "long" else high >= pos.liquidation_price
                     if hit_liq:
-                        self._close(key, pos, pos.liquidation_price, "loss", closed_at=closed_at, liquidated=True)
+                        self._close(key, pos, pos.liquidation_price, "loss", closed_at=closed_at, liquidated=True,
+                                    exit_type="liquidation")
                         continue
 
                 self._maybe_update_trailing_stop(pos, high if pos.direction == "long" else low)
@@ -417,7 +445,8 @@ class PaperTradingLedger:
 
                 if hit_sl or hit_tp:
                     exit_price = effective_stop if hit_sl else pos.target
-                    self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=closed_at)
+                    self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=closed_at,
+                                exit_type="stop" if hit_sl else "target")
 
     def _outcome(self, pos: PaperPosition, exit_price: float) -> str:
         """"win"/"loss" by actual price movement, not just "which boundary
@@ -431,12 +460,17 @@ class PaperTradingLedger:
 
     def _close(
         self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str,
-        closed_at: str | None, liquidated: bool = False,
+        closed_at: str | None, liquidated: bool = False, exit_type: str = "target",
     ) -> None:
-        if self.slippage_pct:
+        # A stop fills past its trigger (market order); a target does not
+        # (limit order). See the stop_slippage_pct note in __init__.
+        slip = self.slippage_pct
+        if exit_type in ("stop", "liquidation"):
+            slip += self.stop_slippage_pct
+        if slip:
             # Adverse fill on the way out too: a long sells for less, a
             # short buys back for more than the theoretical SL/TP/liq price.
-            exit_price *= (1 - self.slippage_pct) if pos.direction == "long" else (1 + self.slippage_pct)
+            exit_price *= (1 - slip) if pos.direction == "long" else (1 + slip)
 
         sign = 1 if pos.direction == "long" else -1
         gross_pnl_dollars = pos.quantity * (exit_price - pos.entry_price) * sign
@@ -454,7 +488,7 @@ class PaperTradingLedger:
             "entry_price": pos.entry_price, "exit_price": exit_price,
             "pnl_dollars": round(pnl_dollars, 4), "pnl_pct": round(pnl_pct, 4),
             "fee_dollars": round(fee_dollars, 4),
-            "outcome": outcome, "liquidated": liquidated, "opened_at": pos.opened_at,
+            "outcome": outcome, "liquidated": liquidated, "exit_type": exit_type, "opened_at": pos.opened_at,
             "closed_at": closed_at or datetime.utcnow().isoformat(),
         })
         # Cap in-memory history; keep last_learned_count valid against the trim.
