@@ -74,7 +74,8 @@ class PaperTradingLedger:
 
     def __init__(
         self, path: str | None = None, starting_balance: float | None = None, slippage_pct: float = 0.0,
-        stop_slippage_pct: float = 0.0,
+        stop_slippage_pct: float = 0.0, equity_based_sizing: bool | None = None,
+        max_drawdown_halt_pct: float | None = None,
     ) -> None:
         # Separate file per asset class — crypto and stock win rates are
         # different markets and shouldn't be averaged into one stat.
@@ -125,6 +126,17 @@ class PaperTradingLedger:
         # baseline), so a rule that wins despite stop slippage is winning
         # against an already-flattered comparison.
         self.stop_slippage_pct = stop_slippage_pct
+        # Size off current equity rather than the never-changing starting
+        # balance. See settings.PAPER_TRADING_EQUITY_BASED_SIZING for why
+        # the old behaviour amplifies drawdowns instead of damping them.
+        self.equity_based_sizing = (settings.PAPER_TRADING_EQUITY_BASED_SIZING
+                                    if equity_based_sizing is None else equity_based_sizing)
+        # Block NEW entries once equity is this far below its peak (percent);
+        # 0.0 disables. Open positions keep their own stops regardless.
+        self.max_drawdown_halt_pct = (settings.PAPER_TRADING_MAX_DRAWDOWN_HALT_PCT
+                                      if max_drawdown_halt_pct is None else max_drawdown_halt_pct)
+        self.peak_balance = self.starting_balance
+        self._halted = False   # sticky until drawdown recovers past the hysteresis band
         self.open_positions: dict[tuple[str, str, str], PaperPosition] = {}
         self.closed_trades: list[dict] = []
         self.last_learned_count = 0  # index into closed_trades already used for GNN updates
@@ -180,6 +192,39 @@ class PaperTradingLedger:
 
     # ── Trading ────────────────────────────────────────────────────────────
 
+    def _sizing_base(self) -> float:
+        """Capital that risk, the correlation cap and the notional cap are
+        all sized against. Current equity when equity-based sizing is on,
+        else the original starting balance (the historical behaviour)."""
+        if not self.equity_based_sizing:
+            return self.starting_balance
+        # Never size off a non-positive balance, and never scale UP past the
+        # starting balance here -- growing the risk unit on winnings is a
+        # separate decision this change is deliberately not making.
+        return max(0.0, min(self.balance, self.starting_balance))
+
+    def _drawdown_pct(self) -> float:
+        if self.peak_balance <= 0:
+            return 0.0
+        return max(0.0, (self.peak_balance - self.balance) / self.peak_balance * 100)
+
+    def _entries_halted(self) -> bool:
+        """Sticky drawdown halt with hysteresis: trips at the threshold,
+        clears only once drawdown recovers to half of it, so the system
+        doesn't flap on and off while hovering at the boundary."""
+        if self.max_drawdown_halt_pct <= 0:
+            return False
+        dd = self._drawdown_pct()
+        if self._halted:
+            if dd <= self.max_drawdown_halt_pct / 2:
+                self._halted = False
+                logger.info("PAPER: drawdown recovered to %.1f%% — entries resumed", dd)
+        elif dd >= self.max_drawdown_halt_pct:
+            self._halted = True
+            logger.warning("PAPER: drawdown %.1f%% >= %.1f%% — NEW ENTRIES HALTED "
+                           "(open positions keep their stops)", dd, self.max_drawdown_halt_pct)
+        return self._halted
+
     def _maybe_open_unlocked(
         self, symbol: str, market: str, rec: dict, timeframe: str = "5m", opened_at: str | None = None,
         current_price: float | None = None,
@@ -220,6 +265,11 @@ class PaperTradingLedger:
         key = (symbol, market, timeframe)
         if key in self.open_positions:
             return None
+        # Drawdown circuit breaker — checked before anything else so a
+        # halted account genuinely stops adding risk. Open positions are
+        # untouched and keep their own stops; only NEW entries are blocked.
+        if self._entries_halted():
+            return f"Entri dihentikan: drawdown {self._drawdown_pct():.1f}% >= {self.max_drawdown_halt_pct:.1f}%"
         if not rec.get("actionable"):
             return None
         entry_zone = rec.get("entry_zone")
@@ -255,12 +305,23 @@ class PaperTradingLedger:
             logger.debug("%s %s: %s", symbol, market, reason)
             return reason
 
-        # Fixed-risk sizing off STARTING balance, not current balance:
-        # sizing off current balance compounds every single trade, and over
-        # hundreds of sequential trades (a full backtest run) that compounds
-        # geometrically into meaningless numbers. Sizing off a fixed risk
-        # unit keeps the PnL curve roughly linear and interpretable, which
-        # is what "what's the win rate" actually needs.
+        # Sizing base — see _sizing_base(). Historically this was always
+        # STARTING balance, for a good measurement reason: sizing off current
+        # balance compounds every trade, and over hundreds of sequential
+        # trades that compounds geometrically into meaningless numbers, while
+        # a fixed risk unit keeps the PnL curve roughly linear and
+        # interpretable, which is what "what's the win rate" actually needs.
+        #
+        # That reasoning is about MEASUREMENT, and it does not survive
+        # contact with real money: a fixed $200 risk unit on a $10,000
+        # account is 6.3% of what's left after a 68.5% drawdown, so the risk
+        # FRACTION grows exactly when the account can least afford it.
+        #
+        # _sizing_base() resolves the conflict asymmetrically when
+        # equity-based sizing is enabled: it scales DOWN with losses (the
+        # survival property) but is capped at starting_balance so winnings
+        # never inflate the risk unit (the interpretability property).
+        # Default stays False, so historical backtests are unaffected.
         #
         # Conviction scaling: a confidence=0 signal risks 1x the base unit;
         # confidence=100 risks up to PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER.
@@ -270,7 +331,7 @@ class PaperTradingLedger:
         max_mult = settings.PAPER_TRADING_MAX_CONFIDENCE_MULTIPLIER
         conviction_multiplier = 1.0 + (confidence / 100.0) * (max_mult - 1.0)
 
-        risk_amount = self.starting_balance * settings.PAPER_TRADING_RISK_PCT * conviction_multiplier
+        risk_amount = self._sizing_base() * settings.PAPER_TRADING_RISK_PCT * conviction_multiplier
 
         # Derivative gets a modest, damped bump on top of conviction scaling
         # — real leverage doesn't make a risk-sized trade bigger (that's the
@@ -302,7 +363,7 @@ class PaperTradingLedger:
             for pos in self.open_positions.values()
             if get_correlation(symbol, pos.symbol) >= settings.PORTFOLIO_CORRELATION_THRESHOLD
         )
-        portfolio_cap = self.starting_balance * settings.PORTFOLIO_MAX_CORRELATED_RISK_PCT
+        portfolio_cap = self._sizing_base() * settings.PORTFOLIO_MAX_CORRELATED_RISK_PCT
         if correlated_exposure + risk_amount > portfolio_cap:
             reason = (
                 f"Portfolio correlated-risk cap tercapai "
@@ -317,7 +378,7 @@ class PaperTradingLedger:
         # Hard cap regardless — a tight-but-not-rejected stop combined with
         # a much wider target (or the derivative bump above) can still
         # produce an unrealistic position size.
-        max_notional = self.starting_balance * MAX_NOTIONAL_MULTIPLE
+        max_notional = self._sizing_base() * MAX_NOTIONAL_MULTIPLE
         if quantity * entry_price > max_notional:
             quantity = max_notional / entry_price
 
@@ -542,6 +603,7 @@ class PaperTradingLedger:
         pnl_pct = (pnl_dollars / (pos.quantity * pos.entry_price)) if pos.entry_price else 0.0
 
         self.balance += pnl_dollars
+        self.peak_balance = max(self.peak_balance, self.balance)
         self.closed_trades.append({
             "symbol": pos.symbol, "market": pos.market, "direction": pos.direction,
             "timeframe": pos.timeframe,
