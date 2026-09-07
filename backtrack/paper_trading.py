@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
@@ -79,6 +80,20 @@ class PaperTradingLedger:
         # different markets and shouldn't be averaged into one stat.
         self.path = path or os.path.join(settings.BACKTRACK_LOG_DIR, f"paper_ledger_{settings.ASSET_TYPE}.json")
         self.starting_balance = starting_balance if starting_balance is not None else settings.PAPER_TRADING_STARTING_BALANCE
+        # Guards every mutation of balance/open_positions/closed_trades.
+        #
+        # Needed since 2026-09-07, when SL/TP monitoring moved out of the
+        # 60s decision_loop into its own fast thread: the ledger is now
+        # touched concurrently by the monitor thread (check_and_close +
+        # save), the decision loop (maybe_open + check_and_close + save)
+        # and the scheduler thread (learning hooks). Without this, two
+        # threads can close the same position twice, or save() can
+        # serialise a half-mutated dict to disk.
+        #
+        # RLock, not Lock: these methods legitimately call one another
+        # (check_and_close -> _close), and a plain Lock would self-deadlock.
+        self._lock = threading.RLock()
+
         self.balance = self.starting_balance
         # Adverse slippage applied to BOTH legs of every fill (entry and
         # exit) — 0.0 in live/default use (see backtrack_logs vs backtest.py
@@ -148,7 +163,7 @@ class PaperTradingLedger:
         except Exception as exc:
             logger.warning("Paper ledger load failed, starting fresh: %s", exc)
 
-    def save(self) -> None:
+    def _save_unlocked(self) -> None:
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             payload = {
@@ -165,7 +180,7 @@ class PaperTradingLedger:
 
     # ── Trading ────────────────────────────────────────────────────────────
 
-    def maybe_open(
+    def _maybe_open_unlocked(
         self, symbol: str, market: str, rec: dict, timeframe: str = "5m", opened_at: str | None = None,
         current_price: float | None = None,
     ) -> str | None:
@@ -374,7 +389,7 @@ class PaperTradingLedger:
             return pos.stop_loss
         return max(pos.stop_loss, pos.trailing_stop) if pos.direction == "long" else min(pos.stop_loss, pos.trailing_stop)
 
-    def check_and_close(self, current_prices: dict[str, float]) -> None:
+    def _check_and_close_unlocked(self, current_prices: dict[str, float]) -> None:
         """Live mode: check open positions against a single latest price per symbol.
 
         Records the OBSERVED price that triggered the exit, not just the
@@ -437,7 +452,7 @@ class PaperTradingLedger:
                             exit_type="stop" if hit_sl else "target",
                             trigger_price=trigger, observed_price=price)
 
-    def check_and_close_ohlc(self, symbol: str, low: float, high: float, closed_at: str, timeframe: str | None = None) -> None:
+    def _check_and_close_ohlc_unlocked(self, symbol: str, low: float, high: float, closed_at: str, timeframe: str | None = None) -> None:
         """
         Backtest mode: check a position against a full candle's [low, high]
         range instead of a single price, since intrabar price action isn't
@@ -557,16 +572,16 @@ class PaperTradingLedger:
 
     # ── Continual learning hook ────────────────────────────────────────────
 
-    def get_unlearned_trades(self) -> list[dict]:
+    def _get_unlearned_trades_unlocked(self) -> list[dict]:
         """Closed trades since the last GNN learning update."""
         return self.closed_trades[self.last_learned_count:]
 
-    def mark_learned(self) -> None:
+    def _mark_learned_unlocked(self) -> None:
         self.last_learned_count = len(self.closed_trades)
 
     # ── Reporting ──────────────────────────────────────────────────────────
 
-    def stats(self) -> dict:
+    def _stats_unlocked(self) -> dict:
         def _breakdown(trades: list[dict]) -> dict:
             n = len(trades)
             wins = sum(1 for t in trades if t["outcome"] == "win")
@@ -601,3 +616,38 @@ class PaperTradingLedger:
             "derivative": _breakdown(deriv_trades),
             "by_timeframe": by_timeframe,
         }
+
+    # ── Thread-safety wrappers ─────────────────────────────────────────────
+    # The real implementations are the _*_unlocked methods above/below. These
+    # thin wrappers are the public API and hold self._lock for the whole
+    # operation, so the fast SL/TP monitor thread and the 60s decision loop
+    # cannot interleave inside a mutation. See the _lock comment in __init__.
+
+    def save(self) -> None:
+        with self._lock:
+            return self._save_unlocked()
+
+    def maybe_open(self, *args, **kwargs):
+        with self._lock:
+            return self._maybe_open_unlocked(*args, **kwargs)
+
+    def check_and_close(self, current_prices: dict[str, float]) -> None:
+        with self._lock:
+            return self._check_and_close_unlocked(current_prices)
+
+    def check_and_close_ohlc(self, symbol: str, low: float, high: float,
+                             closed_at: str, timeframe: str | None = None) -> None:
+        with self._lock:
+            return self._check_and_close_ohlc_unlocked(symbol, low, high, closed_at, timeframe)
+
+    def get_unlearned_trades(self) -> list[dict]:
+        with self._lock:
+            return self._get_unlearned_trades_unlocked()
+
+    def mark_learned(self) -> None:
+        with self._lock:
+            return self._mark_learned_unlocked()
+
+    def stats(self) -> dict:
+        with self._lock:
+            return self._stats_unlocked()

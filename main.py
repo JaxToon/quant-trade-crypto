@@ -728,6 +728,42 @@ async def async_main() -> None:
     decision_thread = threading.Thread(target=run_decision_loop, daemon=True, name="DecisionLoop")
     decision_thread.start()
 
+    # 8b. Dedicated SL/TP monitor (fast — see PAPER_TRADING_SLTP_CHECK_SECONDS)
+    #
+    # Split out of decision_loop on 2026-09-07. check_and_close used to run
+    # only once per 60s cycle, queued behind circuit.update() (a network
+    # fetch) and gnn.predict_all(). Prices were arriving every tick over the
+    # WebSocket, so the data was live but the stop check was not — a breached
+    # stop could go unnoticed for up to a minute of real movement, which is
+    # very likely the dominant term in the 0.25-0.60% live stop slippage
+    # measured against a ~0.51% break-even.
+    #
+    # This loop deliberately does the minimum: read the latest prices, check
+    # them against open positions, persist. No GNN, no network, no entry
+    # logic — nothing that could make it slow enough to reintroduce the gap
+    # it exists to close. The ledger is internally locked (see
+    # PaperTradingLedger._lock), so running concurrently with decision_loop
+    # is safe.
+    def run_sltp_monitor():
+        interval = settings.PAPER_TRADING_SLTP_CHECK_SECONDS
+        logger.info("SL/TP monitor started (every %.1fs)", interval)
+        while not _shutdown.is_set():
+            try:
+                if _paper_ledger is not None:
+                    prices = _current_prices()
+                    if prices:
+                        before = len(_paper_ledger.closed_trades)
+                        _paper_ledger.check_and_close(prices)
+                        if len(_paper_ledger.closed_trades) != before:
+                            _paper_ledger.save()
+            except Exception as exc:
+                logger.error("SL/TP monitor error: %s", exc, exc_info=True)
+            _shutdown.wait(interval)
+
+    if _paper_ledger is not None:
+        sltp_thread = threading.Thread(target=run_sltp_monitor, daemon=True, name="SLTPMonitor")
+        sltp_thread.start()
+
     # 9. Integrated Market Stream with SMC analysis (async — blocks here until shutdown)
     stream = IntegratedMarketStream(source="auto")
     stream.add_callback(on_tick)
