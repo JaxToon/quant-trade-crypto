@@ -127,7 +127,7 @@ class RegimeDetector:
         if settings.ASSET_TYPE == "crypto":
             try:
                 resp = requests.get(
-                    "https://api.binance.com/api/v3/klines",
+                    f"{settings.BINANCE_REST_BASE}/api/v3/klines",
                     params={"symbol": self._benchmark, "interval": "1h", "limit": 25},
                     timeout=5,
                 )
@@ -166,7 +166,7 @@ class RegimeDetector:
         if settings.ASSET_TYPE == "crypto":
             try:
                 resp = requests.get(
-                    "https://api.binance.com/api/v3/klines",
+                    f"{settings.BINANCE_REST_BASE}/api/v3/klines",
                     params={"symbol": self._benchmark, "interval": "1h", "limit": min(need, 1000)},
                     timeout=15,
                 )
@@ -216,7 +216,7 @@ class RegimeDetector:
         if settings.ASSET_TYPE == "crypto":
             try:
                 resp = requests.get(
-                    "https://api.binance.com/api/v3/klines",
+                    f"{settings.BINANCE_REST_BASE}/api/v3/klines",
                     params={"symbol": self._benchmark, "interval": "1h", "limit": min(days * 24, 1000)},
                     timeout=15,
                 )
