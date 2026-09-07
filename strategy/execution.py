@@ -48,6 +48,26 @@ class ExecutionEngine:
             settings.BINANCE_API_SECRET,
             testnet=settings.BINANCE_TESTNET,
         )
+        # python-binance's `testnet=True` does NOT redirect spot REST calls.
+        # Its own docstring says the flag is "only available for vanilla
+        # options at the moment", and BaseClient.__init__ overwrites
+        # self.API_URL with the PRODUCTION endpoint unconditionally; the flag
+        # only switches the websocket and futures/options URLs.
+        #
+        # So BINANCE_TESTNET was a safety switch that did not switch anything
+        # for spot orders. Harmless while the configured keys are testnet keys
+        # (production rejects them with -2015), but if a PRODUCTION key ever
+        # landed in .env while someone trusted BINANCE_TESTNET=true to hold
+        # the system back, it would have placed real orders with real money.
+        #
+        # Found 2026-09-07 while checking the order path end-to-end. Pin the
+        # URL explicitly so the flag means what every caller assumes it means.
+        if settings.BINANCE_TESTNET:
+            self._client.API_URL = Client.API_TESTNET_URL
+            logger.warning("TESTNET mode: REST endpoint pinned to %s", self._client.API_URL)
+        else:
+            logger.warning("LIVE mode: REST endpoint is %s — REAL ORDERS, REAL MONEY",
+                           self._client.API_URL)
         self._open_positions: dict[str, Position] = {}
         self._daily_pnl: float = 0.0
         self._trading_day: date = date.today()
