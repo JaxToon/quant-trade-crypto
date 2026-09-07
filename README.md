@@ -15,7 +15,7 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
   - **Tokocrypto is a viable Binance replacement from this network (2026-09-07).** Runs on Binance Cloud: `https://www.tokocrypto.site/api/v3/klines` returns the **Binance-identical** kline array, all 8 watchlist symbols are listed (of 3,692), and order-book depth is not merely comparable but **the same book** — BNB $3,245,068 / AVAX $690,986 / XRP $3,020,902 identical to the dollar against Binance, with slippage +0.000% at our $500-$5,000 order sizes. Crucially it supports **STOP_LOSS_LIMIT, TAKE_PROFIT_LIMIT and OCO** — the exchange-held-stop capability whose absence disqualified Indodax — plus WebSocket streams and Self-Trade Prevention. All hosts resolve to real AWS IPs (not sinkholed), and it is locally licensed. **This removes the "no reachable venue" blocker on the real-money goal**, and the port is cheap since the codebase is already Binance-shaped. Still unverified without credentials: whether order EXECUTION routes to Binance's matching engine (identical depth is strong evidence, not proof), and whether Indonesian accounts face restrictions invisible on public endpoints. **Not next, though** — gates 1-2 (is the strategy profitable after its own costs?) are still open. Full detail in `RESEARCH_NOTES.md`.
   - **Exchange alternatives were researched and Indodax was DISQUALIFIED (2026-09-07).** Tested 13 venues from this network: every foreign exchange (Binance, OKX, Bybit, KuCoin, MEXC, Bitget, Kraken, Coinbase) sinkholes to `202.51.102.114`; the Indonesian-licensed ones (Indodax, Tokocrypto, Pintu) and Gate.io resolve normally. Indodax has a real documented API, all 8 watchlist symbols, OHLCV at exactly 5m/15m/1h, and WebSockets — but **Trade API 2.0 supports LIMIT and MARKET only and rejects stops outright (`stop_limit_not_available`)**. That is disqualifying here specifically: this system's real-money safety design rests on exchange-held stop orders so protection survives the process dying, and this deployment has a measured 2.5-day outage (2026-09-04→09-07) during which two shorts breached their stops. Separately, Indodax books are 9-70x thinner (DOT top-of-book **$2** vs Binance's $9,763), and walking the book puts DOT at **+0.76%/+0.90%/+1.21% slippage at $500/$2k/$5k — above the ~0.51% break-even, in calm conditions**. BTC/ETH/SOL/XRP still fill at +0.000% at our sizes. **Tokocrypto, by contrast, IS viable** — an earlier version of this note dismissed it after testing `api.tokocrypto.com`, a hostname that was guessed rather than read from the docs; the documented bases are `www.tokocrypto.com` / `www.tokocrypto.site`, both reachable. See the Tokocrypto bullet above. **Not to be acted on yet** — gates 1-2 (is the strategy profitable after its own costs?) are still open. Full detail in `RESEARCH_NOTES.md`.
   - **Binance REST is DNS-hijacked on this network — diagnosed and worked around 2026-09-07.** Every `*.binance.com` host (api, api1/2, fapi, stream) resolves to `202.51.102.114` = `traefik54.iforte.net.id`, an Indonesian ISP sinkhole with no Binance certificate, so TLS dies with `TLSV1_UNRECOGNIZED_NAME`. This had been failing silently on essentially every cycle: **7,970 `Binance klines failed ... trying yfinance` warnings in a single pre-fix run**, meaning the HMM regime detector behind the bear veto and the 70% risk reduction was running on unchosen fallback data for the deployment's whole life. Fixed via `settings.BINANCE_REST_BASE`, now defaulting to `https://data-api.binance.vision` (Binance's own public market-data host, same `/api/v3/klines` contract, not on the block list) — verified live, **7,970 failures -> 0**. **Does not unblock trading:** order placement still needs `api.binance.com`, so Binance real-money execution is infrastructurally impossible from this network regardless of strategy quality. `testnet.binance.vision` is reachable, so testnet order-path testing remains possible. Full detail in `RESEARCH_NOTES.md`.
-  - **Real-money-readiness audit (Fase 3-4, 2026-09-04): Path 2 is unfixable-as-is without user action, and live paper trading has a real, quantified slippage gap.** Path 2's testnet API credentials don't authenticate at all (`APIError -2015`, isolated to credentials not connectivity) — needs the user to generate valid testnet keys before any further work there; separately, `TRADE_THRESHOLD=0.55` is 91.7% of the P(Trade) formula's hard 0.6 ceiling, meaning even a perfectly-unbiased debate would rarely cross it. Recommendation (not acted on, user's call): decommission Path 2, focus on Path 1. Live paper trading's SL exits WERE recorded at the exact theoretical stop price, not the real price that triggered the check — tested against real market data on 4 recent live SHORT stop-outs and found 0.25-0.60% real overshoot every time (1.25-3x the modeled round-trip fee). **Instrumented and fixed 2026-09-07**: stop exits now book the observed price and record the measured overshoot, so this cost is accumulating as data instead of being discarded (`python slippage_report.py`). Full detail in `RESEARCH_NOTES.md` ("Path 2 audit, consolidated" and "Fase 4" sections).
+  - **Real-money-readiness audit (Fase 3-4, 2026-09-04): Path 2 is unfixable-as-is without user action, and live paper trading has a real, quantified slippage gap.** Path 2's testnet API credentials don't authenticate at all (`APIError -2015`, isolated to credentials not connectivity) — needs the user to generate valid testnet keys before any further work there; separately, `TRADE_THRESHOLD=0.55` is 91.7% of the P(Trade) formula's hard 0.6 ceiling, meaning even a perfectly-unbiased debate would rarely cross it. Recommendation (not acted on, user's call): decommission Path 2, focus on Path 1. Live paper trading's SL exits WERE recorded at the exact theoretical stop price, not the real price that triggered the check — tested against real market data on 4 recent live SHORT stop-outs and found 0.25-0.60% real overshoot every time. **That figure was later corrected (2026-09-07): those 4 were cherry-picked from the bad tail; across 31 reconstructed stop exits the real mean is 0.119%, median 0.068%.** **Instrumented and fixed 2026-09-07**: stop exits now book the observed price and record the measured overshoot, so this cost is accumulating as data instead of being discarded (`python slippage_report.py`). Full detail in `RESEARCH_NOTES.md` ("Path 2 audit, consolidated" and "Fase 4" sections).
   - **A structural GNN checkpoint-corruption bug was found and permanently fixed (2026-08-28).** The model's architecture was built from whichever Neo4j edge types happened to have >=1 edge at retrain time — the daily graph-pruning job fully emptying a low-count type (SUPPLIES, REGULATES) made the next retrain produce an incompatibly-shaped model, silently falling back to a zero signal until noticed. Root-fixed in `gnn/dataset.py`/`gnn/trainer.py` — the model's parameter shape is now independent of which edge types are currently populated. Both checkpoints retrained against the stable architecture and verified loading cleanly. Full forensics in `RESEARCH_NOTES.md`.
   - **Real 1-minute stock candles were tested as a training-data upgrade and REJECTED — no measured benefit (2026-09-03).** A HuggingFace 1m OHLCV dataset (Finnhub-sourced) was pulled for all 8 stock tickers (2022-2026, ~5.6M rows, via duckdb querying remote parquet directly — no 87.7GB download) and A/B-tested against the current yfinance-1h production path over the same 12-month window with equalized training compute. **The 1h baseline scored highest** (74.4% held-out directional accuracy / IC 0.701) vs the 1-minute arms' 71.1-71.9% — all differences inside noise, and no arm showed the collapse-to-constant failure the extra data was meant to fix (already solved by the earlier feature-normalization work). Not wired into `train_gnn.py`; the fetch/AB scripts are kept in `experiments/` and re-runnable. Full write-up in `RESEARCH_NOTES.md`.
   - **Neo4j now runs on the user's local Neo4j Desktop instance, not Docker.** Docker Desktop's own reliability (crashes/pauses, especially after laptop sleep) was the dominant operational failure mode for weeks; switched 2026-08-28 with a verified, lossless data merge. See `DEPLOYMENT.md`.
@@ -461,9 +461,8 @@ Reads real *closed, losing* trades from Neo4j (Path 2 only — the LLM-consensus
 Measured 2026-09-04 (`experiments/breakeven_under_slippage.py`, 730d /
 6 segments / 1h, full write-up in `RESEARCH_NOTES.md`).
 
-A breached stop becomes a **market order** and fills past its trigger. On
-4 real live SHORT stop-outs that overshoot was **0.25-0.60%**. The
-backtest priced it at zero. Charging it to stop exits only (targets are
+A breached stop becomes a **market order** and fills past its trigger. The
+backtest priced that at zero. Charging it to stop exits only (targets are
 limit orders and don't slip adversely) gives:
 
 | Stop slippage | Baseline total PnL | Worst-segment DD |
@@ -473,10 +472,31 @@ limit orders and don't slip adversely) gives:
 | 0.40% | +$63,640 | **116.9%** |
 | 0.60% | −$48,991 | 253.4% |
 
-**The strategy crosses into loss at roughly 0.51% slippage — inside the
-band we have already measured.** Worse, a worst-segment drawdown above
-100% means the account went past zero: at 0.40% the baseline suffers
-**ruin in at least one of the six segments** despite positive total PnL.
+**The strategy crosses into loss at roughly 0.51% slippage.** A
+worst-segment drawdown above 100% means the account went past zero: at
+0.40% the baseline suffers **ruin in at least one of the six segments**
+despite positive total PnL.
+
+**How close are we actually? Not close — corrected 2026-09-07.** An
+earlier version of this section claimed 0.51% was "inside the band we have
+already measured", citing 0.25-0.60%. That figure came from **4 stop-outs
+examined by hand** — and those 4 were not a sample, they were the SHORT
+losses under investigation at the time, i.e. drawn from the bad tail.
+Reconstructed properly from **31 live-detected stop exits** using Binance
+1-second klines (`experiments/reconstruct_historical_slippage.py`):
+
+| | claimed (n=4) | actual (n=31) |
+|---|---|---|
+| Stop slippage | 0.25-0.60% | **mean 0.119%, median 0.068%** |
+
+So the live system sits ~4x further below break-even than previously
+stated, and was never on a knife's edge. The 0.51% threshold still matters
+as a design constraint — it is why venue liquidity and execution latency
+get checked at all — but it is not a live emergency. (Caveat on the
+reconstruction: the pre-fix system acted on the last tick RECEIVED, which
+under a 60s loop could be up to a minute older than the recorded
+`closed_at`, so the OLD column carries real error bars. What survives is
+the order of magnitude: ~0.1%, not ~0.5%.)
 
 Consequences for how this repo should be used:
 
@@ -507,7 +527,9 @@ Consequences for how this repo should be used:
   slippage (real fills also pay order-book depth, market impact and
   exchange latency). True cost is that figure or worse, never better —
   conservative in the useful direction, since a lower bound already near
-  0.51% settles the question on its own.
+  0.51% settles the question on its own. (Reconstruction from 31 historical
+  stop exits since put the real figure at ~0.119% mean — see the correction
+  above.)
 - Reducing slippage (limit-based stop handling, liquidity-aware sizing)
   now outranks every signal-side improvement measured in this project.
 
