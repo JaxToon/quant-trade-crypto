@@ -171,6 +171,39 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # NOTE this does NOT make Binance TRADING reachable from such a network —
 # order placement would still need api.binance.com. That is a live blocker
 # for any real-money deployment here and is tracked in README.md.
+# Size positions off CURRENT equity instead of the original starting balance.
+#
+# The existing behaviour (False) computes risk_amount, the correlation cap
+# and the notional cap all from `starting_balance`, which never changes. So
+# a $10,000 account risking 2% risks $200 per trade forever — and when a
+# drawdown takes it to $3,150, that same $200 is 6.3% of what's left. The
+# risk FRACTION grows exactly as the account can least afford it, which
+# accelerates drawdowns instead of damping them.
+#
+# True sizes off current balance, so losses shrink the next position
+# automatically. Backtested drawdown at measured slippage was worst-segment
+# 68.5% / median 42.7% under the old behaviour -- see
+# experiments/drawdown_at_real_slippage.py and the sizing experiment.
+#
+# Default False: existing live ledgers and every historical backtest keep
+# behaving exactly as before unless a caller opts in.
+PAPER_TRADING_EQUITY_BASED_SIZING = os.getenv("PAPER_TRADING_EQUITY_BASED_SIZING", "false").lower() == "true"
+
+# Stop opening NEW positions once equity falls this far below its peak
+# (percent). 0.0 disables the halt entirely, which is the current state.
+#
+# Worth being explicit about why this is needed: DAILY_DRAWDOWN_LIMIT (5%)
+# is enforced only in strategy/execution.py -- Path 2, currently disabled.
+# Path 1, the path with the actual backtested evidence and the one any
+# real-money deployment would use, has no loss limit of any kind: no daily
+# halt, no drawdown stop, no kill switch. A losing streak runs unchecked.
+#
+# Existing positions are never force-closed by this -- they keep their own
+# stops. Only new entries are blocked. Trading resumes once drawdown
+# recovers to half the threshold (hysteresis), so the system doesn't flap
+# on and off at the boundary.
+PAPER_TRADING_MAX_DRAWDOWN_HALT_PCT = float(os.getenv("PAPER_TRADING_MAX_DRAWDOWN_HALT_PCT", "0.0"))
+
 # How often the dedicated SL/TP monitor thread checks open positions
 # against live price, in seconds.
 #
