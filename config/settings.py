@@ -171,6 +171,33 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # NOTE this does NOT make Binance TRADING reachable from such a network —
 # order placement would still need api.binance.com. That is a live blocker
 # for any real-money deployment here and is tracked in README.md.
+# How often the dedicated SL/TP monitor thread checks open positions
+# against live price, in seconds.
+#
+# Until 2026-09-07 there was no such thread: check_and_close ran once per
+# 60s decision_loop cycle, queued behind a regime update (a network fetch)
+# and full GNN inference. Prices arrived every tick over the WebSocket, but
+# the stop check only looked once a minute — so a breached stop could sit
+# unnoticed for up to a minute of real market movement.
+#
+# That gap is very likely the dominant term in the 0.25-0.60% stop slippage
+# measured live, which matters because the strategy's backtested break-even
+# is ~0.51%. Measured 1-minute candle ranges across the watchlist: median
+# 0.065%, p90 0.197%, p99 0.410%, max 1.273% — the same order of magnitude
+# as the observed slippage, which is what you would expect if the check
+# interval were the cause. Stops break during fast moves, i.e. the tail.
+#
+# 1s is deliberately conservative rather than per-tick: it shrinks the
+# window ~60x while keeping the loop cheap (a dict read plus a comparison
+# per open position, no network, no GNN, no entry logic).
+#
+# TRADE-OFF, to be measured and not assumed: checking more often also means
+# reacting to transient spikes that a 60s check would have slept through
+# and survived. Expect stop-exit COUNT to rise even as per-exit slippage
+# falls. Judge the change on slippage_report.py plus net PnL, never on
+# either number alone.
+PAPER_TRADING_SLTP_CHECK_SECONDS = float(os.getenv("PAPER_TRADING_SLTP_CHECK_SECONDS", "1.0"))
+
 BINANCE_REST_BASE = os.getenv("BINANCE_REST_BASE", "https://data-api.binance.vision")
 
 BINANCE_KLINE_INTERVAL = os.getenv("BINANCE_KLINE_INTERVAL", "5m")
