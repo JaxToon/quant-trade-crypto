@@ -375,7 +375,36 @@ class PaperTradingLedger:
         return max(pos.stop_loss, pos.trailing_stop) if pos.direction == "long" else min(pos.stop_loss, pos.trailing_stop)
 
     def check_and_close(self, current_prices: dict[str, float]) -> None:
-        """Live mode: check open positions against a single latest price per symbol."""
+        """Live mode: check open positions against a single latest price per symbol.
+
+        Records the OBSERVED price that triggered the exit, not just the
+        theoretical SL/TP level, so the gap between them can be measured.
+
+        Why this matters more than it looks: `breakeven_under_slippage.py`
+        established that this system's backtested edge dies somewhere around
+        0.51% stop slippage, while the only real measurement we have puts
+        live stop fills 0.25-0.60% past their trigger. That band straddles
+        the break-even line, so whether the strategy makes or loses money is
+        currently unknown -- and unmeasurable, because until now a stop exit
+        was booked at exactly its trigger price and the overshoot was thrown
+        away. Each stop exit now carries the numbers needed to settle it.
+
+        IMPORTANT about what this does and does not measure. The gap
+        captured here is the price move between the breach and our next
+        poll. That is a LOWER BOUND on real execution slippage, not the
+        whole of it -- real fills additionally pay order-book depth, market
+        impact and exchange latency, none of which paper trading can see.
+        Useful anyway, and in the conservative direction: if the lower bound
+        alone approaches 0.5%, the question is already answered.
+
+        Fill semantics differ by exit type, deliberately:
+          - stop  -> booked at the observed price. A breached stop becomes a
+                     MARKET order, so the real fill is at the prevailing
+                     price (or worse), never back at the trigger.
+          - target-> still booked at the target. That is a LIMIT order; it
+                     fills at its price when touched and does not capture
+                     any favourable overshoot past it.
+        """
         for key, pos in list(self.open_positions.items()):
             price = current_prices.get(pos.symbol)
             if price is None:
@@ -386,8 +415,9 @@ class PaperTradingLedger:
             if pos.liquidation_price is not None:
                 hit_liq = price <= pos.liquidation_price if pos.direction == "long" else price >= pos.liquidation_price
                 if hit_liq:
-                    self._close(key, pos, pos.liquidation_price, "loss", closed_at=None, liquidated=True,
-                                exit_type="liquidation")
+                    self._close(key, pos, price, "loss", closed_at=None, liquidated=True,
+                                exit_type="liquidation", trigger_price=pos.liquidation_price,
+                                observed_price=price)
                     continue
 
             self._maybe_update_trailing_stop(pos, price)
@@ -399,9 +429,13 @@ class PaperTradingLedger:
                 hit_sl, hit_tp = price >= effective_stop, price <= pos.target
 
             if hit_sl or hit_tp:
-                exit_price = effective_stop if hit_sl else pos.target
-                self._close(key, pos, exit_price, self._outcome(pos, exit_price), closed_at=None,
-                            exit_type="stop" if hit_sl else "target")
+                trigger = effective_stop if hit_sl else pos.target
+                # Stop = market order, so book the price we actually saw.
+                # Target = limit order, so book the limit itself.
+                exit_price = price if hit_sl else pos.target
+                self._close(key, pos, exit_price, self._outcome(pos, trigger), closed_at=None,
+                            exit_type="stop" if hit_sl else "target",
+                            trigger_price=trigger, observed_price=price)
 
     def check_and_close_ohlc(self, symbol: str, low: float, high: float, closed_at: str, timeframe: str | None = None) -> None:
         """
@@ -461,6 +495,7 @@ class PaperTradingLedger:
     def _close(
         self, key: tuple[str, str, str], pos: PaperPosition, exit_price: float, outcome: str,
         closed_at: str | None, liquidated: bool = False, exit_type: str = "target",
+        trigger_price: float | None = None, observed_price: float | None = None,
     ) -> None:
         # A stop fills past its trigger (market order); a target does not
         # (limit order). See the stop_slippage_pct note in __init__.
@@ -471,6 +506,16 @@ class PaperTradingLedger:
             # Adverse fill on the way out too: a long sells for less, a
             # short buys back for more than the theoretical SL/TP/liq price.
             exit_price *= (1 - slip) if pos.direction == "long" else (1 + slip)
+
+        # Measured overshoot past the trigger, signed so that POSITIVE always
+        # means adverse (filled worse than the level), whatever the direction.
+        # Only meaningful on the live path, which is the only caller that
+        # knows an observed price; OHLC backtests leave it None rather than
+        # inventing one from a bar extreme.
+        observed_slippage_pct = None
+        if trigger_price and observed_price and trigger_price > 0:
+            adverse = (trigger_price - observed_price) if pos.direction == "long" else (observed_price - trigger_price)
+            observed_slippage_pct = adverse / trigger_price * 100
 
         sign = 1 if pos.direction == "long" else -1
         gross_pnl_dollars = pos.quantity * (exit_price - pos.entry_price) * sign
@@ -488,7 +533,10 @@ class PaperTradingLedger:
             "entry_price": pos.entry_price, "exit_price": exit_price,
             "pnl_dollars": round(pnl_dollars, 4), "pnl_pct": round(pnl_pct, 4),
             "fee_dollars": round(fee_dollars, 4),
-            "outcome": outcome, "liquidated": liquidated, "exit_type": exit_type, "opened_at": pos.opened_at,
+            "outcome": outcome, "liquidated": liquidated, "exit_type": exit_type,
+            "trigger_price": trigger_price, "observed_price": observed_price,
+            "observed_slippage_pct": None if observed_slippage_pct is None else round(observed_slippage_pct, 4),
+            "opened_at": pos.opened_at,
             "closed_at": closed_at or datetime.utcnow().isoformat(),
         })
         # Cap in-memory history; keep last_learned_count valid against the trim.
@@ -500,9 +548,11 @@ class PaperTradingLedger:
         del self.open_positions[key]
         tag = "LIQUIDATED" if liquidated else outcome.upper()
         logger.info(
-            "PAPER CLOSE %s %s %s @ %.6f | %s | PnL=$%.2f (%.2f%%) | balance=$%.2f",
+            "PAPER CLOSE %s %s %s @ %.6f | %s | PnL=$%.2f (%.2f%%) | balance=$%.2f%s",
             pos.market, pos.direction.upper(), pos.symbol, exit_price,
             tag, pnl_dollars, pnl_pct * 100, self.balance,
+            "" if observed_slippage_pct is None
+            else f" | {exit_type} slip={observed_slippage_pct:+.3f}% (trigger={trigger_price:.6f})",
         )
 
     # ── Continual learning hook ────────────────────────────────────────────

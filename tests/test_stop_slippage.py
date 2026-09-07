@@ -93,16 +93,23 @@ def test_stop_slippage_is_additive_to_symmetric_slippage(tmp_path):
     assert led.closed_trades[0]["exit_price"] == pytest.approx(95.0 * (1 - 0.005))
 
 
-def test_live_path_also_applies_stop_slippage(tmp_path):
-    """check_and_close (live/tick path) must not be left behind — it shares
-    the same exit semantics as the OHLC path."""
+def test_live_path_stacks_modelled_slippage_on_the_observed_price(tmp_path):
+    """check_and_close (live/tick path) must not be left behind — but it
+    starts from a different base than the OHLC path, and deliberately so.
+
+    Since the instrumentation change (2026-09-07) the live path books the
+    OBSERVED price, which already contains the poll-gap component of real
+    slippage. `stop_slippage_pct` then layers on the components paper
+    trading can never see — order-book depth, market impact, exchange
+    latency. Those are separate costs, so stacking them is additive, not
+    double-counting. Base is 94.0 (observed), not 95.0 (trigger)."""
     led = _ledger(tmp_path, stop_slippage_pct=0.004)
     led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
     led.check_and_close({"BTCUSDT": 94.0})
 
     trade = led.closed_trades[0]
     assert trade["exit_type"] == "stop"
-    assert trade["exit_price"] == pytest.approx(95.0 * (1 - 0.004))
+    assert trade["exit_price"] == pytest.approx(94.0 * (1 - 0.004))
 
 
 def test_outcome_label_reflects_the_boundary_not_the_slipped_price(tmp_path):
@@ -113,3 +120,80 @@ def test_outcome_label_reflects_the_boundary_not_the_slipped_price(tmp_path):
     led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
     led.check_and_close_ohlc("BTCUSDT", low=99.0, high=111.0, closed_at="t", timeframe="1h")
     assert led.closed_trades[0]["outcome"] == "win"
+
+
+# ── Live slippage instrumentation ──────────────────────────────────────────
+# Added 2026-09-07. Until this, a live stop exit was booked at exactly its
+# trigger and the overshoot was discarded, which is why the project has only
+# 4 hand-reconstructed slippage data points despite ~90 live trades — and why
+# it cannot currently say whether its own edge survives its own costs.
+
+
+def test_live_stop_books_the_observed_price_not_the_trigger(tmp_path):
+    """The core of the instrumentation: a breached stop is a market order,
+    so the fill is where price actually was, not back at the trigger."""
+    led = _ledger(tmp_path)
+    led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
+    led.check_and_close({"BTCUSDT": 94.5})  # stop 95.0, price gapped to 94.5
+
+    t = led.closed_trades[0]
+    assert t["exit_price"] == pytest.approx(94.5)
+    assert t["trigger_price"] == pytest.approx(95.0)
+    assert t["observed_price"] == pytest.approx(94.5)
+
+
+def test_slippage_is_positive_when_adverse_for_a_long(tmp_path):
+    led = _ledger(tmp_path)
+    led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
+    led.check_and_close({"BTCUSDT": 94.5})
+    # 0.5 below a 95.0 stop = 0.5263% adverse
+    assert led.closed_trades[0]["observed_slippage_pct"] == pytest.approx(0.5263, abs=1e-3)
+
+
+def test_slippage_is_positive_when_adverse_for_a_short(tmp_path):
+    """Sign convention must not flip with direction: positive = adverse,
+    always. A short stopping out buys back ABOVE its stop."""
+    led = _ledger(tmp_path)
+    led.maybe_open("BTCUSDT", "derivative",
+                   _rec(direction="short", stop_loss=105.0, target=90.0), timeframe="1h")
+    led.check_and_close({"BTCUSDT": 105.5})
+    t = led.closed_trades[0]
+    assert t["exit_price"] == pytest.approx(105.5)
+    assert t["observed_slippage_pct"] == pytest.approx(0.4762, abs=1e-3)
+
+
+def test_target_still_books_at_the_limit_not_the_overshoot(tmp_path):
+    """A limit order does not capture favourable overshoot. Booking the
+    observed price here would silently invent profit that no real fill
+    would have earned."""
+    led = _ledger(tmp_path)
+    led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
+    led.check_and_close({"BTCUSDT": 112.0})  # target 110.0, price ran past
+
+    t = led.closed_trades[0]
+    assert t["exit_price"] == pytest.approx(110.0)
+    assert t["observed_price"] == pytest.approx(112.0)
+    assert t["outcome"] == "win"
+
+
+def test_outcome_still_reflects_the_boundary_when_slippage_crosses_entry(tmp_path):
+    """A stop that slips far enough to land past entry is still a LOSS by
+    signal correctness. If outcome were derived from the slipped fill the
+    win rate would quietly become a cost metric."""
+    led = _ledger(tmp_path)
+    led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
+    led.check_and_close({"BTCUSDT": 80.0})
+    assert led.closed_trades[0]["outcome"] == "loss"
+
+
+def test_ohlc_backtest_records_no_observed_slippage(tmp_path):
+    """OHLC has no observed price — only a bar. Leaving these None keeps
+    backtest rows out of the live slippage statistics instead of polluting
+    them with a number invented from a bar extreme."""
+    led = _ledger(tmp_path)
+    led.maybe_open("BTCUSDT", "spot", _rec(), timeframe="1h")
+    led.check_and_close_ohlc("BTCUSDT", low=94.0, high=101.0, closed_at="t", timeframe="1h")
+
+    t = led.closed_trades[0]
+    assert t["observed_slippage_pct"] is None
+    assert t["exit_price"] == pytest.approx(95.0)
