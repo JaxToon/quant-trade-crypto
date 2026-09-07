@@ -152,6 +152,27 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # Real OHLC candle timeframe SMC/FVG operate on (Binance kline interval string).
 # Order Blocks / FVG / market structure need real candle bodies+wicks — using
 # tick-level data here degenerates every "candle" to open==high==low==close.
+# Base URL for Binance REST (klines) calls.
+#
+# Defaults to data-api.binance.vision, NOT api.binance.com, because the
+# latter is DNS-hijacked on at least one network this project runs from:
+# every *.binance.com name resolves to 202.51.102.114 (traefik54.iforte.net.id,
+# an Indonesian ISP sinkhole), and the TLS handshake then dies with
+# `TLSV1_UNRECOGNIZED_NAME` since that host has no Binance certificate.
+# Diagnosed 2026-09-07 after the failure appeared as three different-looking
+# symptoms — a connect timeout, an SSL error, and a silent yfinance
+# fallback firing every ~80s in risk.hmm_regime.
+#
+# data-api.binance.vision is Binance's own public market-data endpoint,
+# serves the identical /api/v3/klines contract, resolves to real AWS IPs,
+# and is not on the block list. It is read-only market data (no auth, no
+# trading), which is exactly what every REST caller here needs.
+#
+# NOTE this does NOT make Binance TRADING reachable from such a network —
+# order placement would still need api.binance.com. That is a live blocker
+# for any real-money deployment here and is tracked in README.md.
+BINANCE_REST_BASE = os.getenv("BINANCE_REST_BASE", "https://data-api.binance.vision")
+
 BINANCE_KLINE_INTERVAL = os.getenv("BINANCE_KLINE_INTERVAL", "5m")
 
 # SMC/FVG runs independently on each of these timeframes ("layers"), not just

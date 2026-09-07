@@ -74,7 +74,7 @@ def _fetch_crypto_window(symbol: str, start: datetime, end: datetime) -> list[di
     start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
     try:
         resp = requests.get(
-            "https://api.binance.com/api/v3/klines",
+            f"{settings.BINANCE_REST_BASE}/api/v3/klines",
             params={"symbol": symbol, "interval": "1m", "startTime": start_ms, "endTime": end_ms, "limit": 1000},
             timeout=15,
         )
