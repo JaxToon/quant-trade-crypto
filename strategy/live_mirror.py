@@ -107,10 +107,19 @@ class LiveOrderMirror:
     # ── exchange helpers ──────────────────────────────────────────────────
 
     def _symbol_filters(self, symbol: str) -> tuple[float, float, float]:
-        """(stepSize, tickSize, minNotional), cached per symbol."""
+        """(stepSize, tickSize, minNotional), cached per symbol.
+
+        Raises ValueError for a symbol the exchange does not list. Binance
+        returns None rather than erroring, and indexing that produced a bare
+        TypeError ("'NoneType' object is not subscriptable") that told the
+        caller nothing about what was actually wrong. Found by the failure-path
+        check, 2026-09-08.
+        """
         if symbol in self._filters:
             return self._filters[symbol]
         info = self._client.get_symbol_info(symbol)
+        if not info or "filters" not in info:
+            raise ValueError(f"{symbol} is not listed on this exchange")
         f = {x["filterType"]: x for x in info["filters"]}
         out = (float(f["LOT_SIZE"]["stepSize"]),
                float(f["PRICE_FILTER"]["tickSize"]),
@@ -176,7 +185,11 @@ class LiveOrderMirror:
             return MirrorResult(False, f"halted: {self._halt_reason}")
 
         symbol, direction = pos.symbol, pos.direction
-        step, tick, min_notional = self._symbol_filters(symbol)
+        try:
+            step, tick, min_notional = self._symbol_filters(symbol)
+        except Exception as exc:
+            logger.error("MIRROR %s: cannot read symbol filters — %s", symbol, exc)
+            return MirrorResult(False, f"symbol unusable: {exc}")
         qty = self._fmt(pos.quantity, step)
         if float(qty) <= 0:
             return MirrorResult(False, "quantity rounds to zero at this symbol's step size")
@@ -218,6 +231,13 @@ class LiveOrderMirror:
             logger.error("MIRROR %s: %s", symbol, msg)
             return MirrorResult(False, msg)
 
+        # Snapshot what is already resting so a rollback cannot cancel another
+        # position's protection along with its own.
+        try:
+            pre_existing = {str(o["orderId"]) for o in self._client.get_open_orders(symbol=symbol)}
+        except Exception:
+            pre_existing = set()
+
         try:
             order = self._client.create_order(symbol=symbol, side=side,
                                               type="MARKET", quantity=qty)
@@ -256,18 +276,33 @@ class LiveOrderMirror:
             return MirrorResult(True, "", entry_id, ids, fill_price)
         except Exception as exc:
             logger.error("MIRROR %s: protection FAILED after entry filled — %s", symbol, exc)
-            self._flatten(symbol, close_side, qty, entry_id)
-            return MirrorResult(False, f"protection failed, entry flattened: {exc}")
+            flattened = self._flatten(symbol, close_side, qty, entry_id, pre_existing)
+            # Report what actually happened. The first version always said
+            # "entry flattened" even when the flatten itself had failed, which
+            # is precisely the case a caller most needs to know about.
+            note = ("protection failed, entry flattened" if flattened
+                    else "protection failed AND rollback failed — POSITION IS NAKED")
+            return MirrorResult(False, f"{note}: {exc}")
 
-    def _flatten(self, symbol: str, close_side: str, qty: str, entry_id: str) -> None:
+    def _flatten(self, symbol: str, close_side: str, qty: str, entry_id: str,
+                 spare_order_ids: set | None = None) -> bool:
         """Undo a filled entry that could not be protected.
 
         Accepts a small spread+fee loss deliberately. The alternative — an
         unprotected position the system has no record of — has no bounded
         downside, which is exactly the failure seen on testnet 2026-09-08.
+
+        `spare_order_ids` are orders that existed BEFORE this entry and belong
+        to other positions on the same symbol. The first version cancelled
+        every open order for the symbol, so rolling one entry back stripped the
+        protection off unrelated positions and left THEM naked — trading one
+        naked position for another. Found by the failure-path check.
         """
+        spare = spare_order_ids or set()
         try:
             for o in self._client.get_open_orders(symbol=symbol):
+                if str(o["orderId"]) in spare:
+                    continue        # someone else's protection — leave it alone
                 try:
                     self._client.cancel_order(symbol=symbol, orderId=o["orderId"])
                 except Exception:
@@ -276,11 +311,13 @@ class LiveOrderMirror:
                                       type="MARKET", quantity=qty)
             logger.warning("MIRROR ROLLBACK %s: unprotectable entry (%s) flattened.",
                            symbol, entry_id)
+            return True
         except Exception as exc:
             logger.critical(
                 "MIRROR ROLLBACK FAILED %s: entry %s filled, protection failed, flatten "
                 "failed (%s). An UNPROTECTED position exists on the exchange that this "
                 "process cannot close. HUMAN INTERVENTION REQUIRED.", symbol, entry_id, exc)
+            return False
 
     def mirror_close(self, symbol: str) -> MirrorResult:
         """Close a mirrored position early, because the ledger closed it for a
