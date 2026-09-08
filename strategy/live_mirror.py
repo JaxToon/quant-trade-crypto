@@ -84,10 +84,30 @@ class LiveOrderMirror:
 
         if self._client is None:
             from binance.client import Client
-            self._client = Client(settings.BINANCE_API_KEY, settings.BINANCE_API_SECRET,
-                                  testnet=settings.BINANCE_TESTNET)
-            if settings.BINANCE_TESTNET:
-                self._client.API_URL = Client.API_TESTNET_URL
+            venue = settings.EXCHANGE_VENUE
+            base = settings.VENUE_REST_URLS.get(venue)
+            if base is None:
+                self.enabled = False
+                logger.critical("LiveOrderMirror: unknown EXCHANGE_VENUE %r. REFUSING to arm. "
+                                "Known venues: %s", venue, list(settings.VENUE_REST_URLS))
+                return
+            # Credentials are per-venue: the Binance vars hold TESTNET keys,
+            # so reusing them against Tokocrypto would send the wrong secret
+            # and fail in a way that looks like a signing bug.
+            if venue == "tokocrypto":
+                key, secret = settings.TOKOCRYPTO_API_KEY, settings.TOKOCRYPTO_API_SECRET
+            else:
+                key, secret = settings.BINANCE_API_KEY, settings.BINANCE_API_SECRET
+            if not key or not secret:
+                self.enabled = False
+                logger.critical("LiveOrderMirror: no credentials configured for venue %r. "
+                                "REFUSING to arm.", venue)
+                return
+            self._client = Client(key, secret)
+            # python-binance's own testnet flag only redirects websockets and
+            # futures, never spot REST — pin the URL explicitly. Same reason
+            # strategy/execution.py does it.
+            self._client.API_URL = base
 
         url = getattr(self._client, "API_URL", "")
         is_testnet = "testnet" in url
@@ -101,8 +121,9 @@ class LiveOrderMirror:
                 "LIVE_TRADING_CONFIRM_REAL_MONEY is not set. REFUSING to arm.", url)
             return
 
-        logger.warning("LiveOrderMirror ARMED against %s%s", url,
-                       "" if is_testnet else "  *** REAL MONEY ***")
+        logger.warning("LiveOrderMirror ARMED  venue=%s  endpoint=%s%s",
+                       settings.EXCHANGE_VENUE, url,
+                       "" if is_testnet else "   *** REAL MONEY ***")
 
     # ── exchange helpers ──────────────────────────────────────────────────
 

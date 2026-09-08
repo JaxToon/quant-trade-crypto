@@ -168,6 +168,45 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # that actually does.
 PORTFOLIO_MAX_NOTIONAL_MULTIPLE = float(os.getenv("PORTFOLIO_MAX_NOTIONAL_MULTIPLE", "0"))
 
+# ── Exchange venue for live orders ────────────────────────────────────────
+# Which exchange strategy/live_mirror.py places orders on.
+#
+# "binance_testnet" (default) — fake money, the only safe default.
+# "tokocrypto"      — the real-money venue for this deployment. Binance
+#                     production is DNS-hijacked on this network (every
+#                     *.binance.com resolves to an ISP sinkhole), so plain
+#                     "binance" is unreachable here and is not offered.
+#
+# Tokocrypto's spot API is Binance-compatible down to the auth: signed
+# endpoints accept X-MBX-APIKEY and return Binance error codes (-1130,
+# -1102, -1104 observed 2026-09-08), and /api/v3/klines returns the identical
+# array shape. So python-binance drives it with nothing but a base-URL swap —
+# no second client, no separate signing code.
+#
+# NOTE the credentials differ per venue. BINANCE_API_KEY holds testnet keys;
+# Tokocrypto needs its own, hence the separate variables below.
+EXCHANGE_VENUE = os.getenv("EXCHANGE_VENUE", "binance_testnet")
+
+VENUE_REST_URLS = {
+    "binance_testnet": "https://testnet.binance.vision/api",
+    "tokocrypto": "https://www.tokocrypto.site/api",
+}
+
+TOKOCRYPTO_API_KEY = os.getenv("TOKOCRYPTO_API_KEY", "")
+TOKOCRYPTO_API_SECRET = os.getenv("TOKOCRYPTO_API_SECRET", "")
+
+# Fee per side actually charged by the venue, used by the ledger.
+#
+# Measured from Tokocrypto's published USDT-market schedule 2026-09-08:
+#   maker 0.15% + taker 0.15% + PPh 0.21% + CFX 0.0222% = 0.3822% PER SIDE
+# That is 3.82x the 0.1% every backtest in this project assumed, and it
+# cascades into MIN_STOP_DISTANCE_PCT, so it changes WHICH setups are
+# tradeable, not merely what they earn. See experiments/real_fee_viability.py.
+VENUE_FEE_PCT = {
+    "binance_testnet": 0.001,
+    "tokocrypto": 0.003822,
+}
+
 # ── Live order mirroring (Path 1 -> real exchange) ────────────────────────
 # Path 1 (SMC/FVG -> PaperTradingLedger) is the path with actual evidence
 # behind it, and until now it could only ever write to a paper ledger.
