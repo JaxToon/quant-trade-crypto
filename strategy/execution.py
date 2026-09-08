@@ -68,6 +68,7 @@ class ExecutionEngine:
         else:
             logger.warning("LIVE mode: REST endpoint is %s — REAL ORDERS, REAL MONEY",
                            self._client.API_URL)
+        self._filter_cache: dict[str, tuple[float, float, float]] = {}
         self._open_positions: dict[str, Position] = {}
         self._daily_pnl: float = 0.0
         self._trading_day: date = date.today()
@@ -136,10 +137,65 @@ class ExecutionEngine:
         ticker = self._client.get_symbol_ticker(symbol=symbol)
         return float(ticker["price"])
 
-    def _compute_quantity(self, symbol: str, balance: float, price: float) -> float:
+    def _symbol_filters(self, symbol: str) -> tuple[float, float, float]:
+        """(stepSize, tickSize, minNotional) from the exchange, cached.
+
+        Previously this code hardcoded "round to 5 decimal places" with the
+        comment "simplified". Real symbols have wildly different LOT_SIZE
+        steps, so 5dp is wrong in both directions: too coarse for some pairs
+        (rejected as a lot-size violation) and needlessly fine for others.
+        """
+        cached = self._filter_cache.get(symbol)
+        if cached:
+            return cached
+        info = self._client.get_symbol_info(symbol)
+        f = {x["filterType"]: x for x in info["filters"]}
+        out = (
+            float(f["LOT_SIZE"]["stepSize"]),
+            float(f["PRICE_FILTER"]["tickSize"]),
+            float(f.get("NOTIONAL", f.get("MIN_NOTIONAL", {})).get("minNotional", 0.0)),
+        )
+        self._filter_cache[symbol] = out
+        return out
+
+    @staticmethod
+    def _fmt(value: float, increment: float) -> str:
+        """Snap to the exchange increment and render as a FIXED-POINT string.
+
+        Both halves matter. Python renders small floats in scientific
+        notation — 0.00008 becomes "8e-05" — and Binance rejects that with
+        -1100 "Illegal characters found in parameter 'quantity'". Passing a
+        raw float lets json serialise it that way, so every order on a small
+        account fails. Found on testnet 2026-09-08.
+        """
+        prec = max(0, len(f"{increment:.10f}".rstrip("0").split(".")[1])) if increment < 1 else 0
+        return f"{round(value / increment) * increment:.{prec}f}"
+
+    def _compute_quantity(self, symbol: str, balance: float, price: float) -> str:
+        """Position quantity as an exchange-ready string, or "" if the trade
+        cannot be placed safely.
+
+        Sizes against the WORST price any leg will use, not the entry price.
+        The stop-loss leg sits below the entry for a long, so a quantity that
+        clears MIN_NOTIONAL at entry can still fail it on the protective leg —
+        which would open the position and then silently fail to protect it,
+        leaving it naked. Refusing the trade is the only safe response.
+        """
+        step, _tick, min_notional = self._symbol_filters(symbol)
         raw_qty = (balance * settings.MAX_POSITION_PCT * settings.LEVERAGE) / price
-        # Round to exchange lot size (simplified: 5 decimal places)
-        return round(raw_qty, 5)
+        qty = round(raw_qty / step) * step
+        if qty <= 0:
+            return ""
+        worst_leg_price = price * (1 - settings.STOP_LOSS_PCT)
+        if qty * worst_leg_price < min_notional:
+            logger.error(
+                "%s: quantity %.8f clears MIN_NOTIONAL at entry (%.2f) but NOT on the "
+                "protective leg (%.2f < %.2f). Refusing — opening this would leave the "
+                "position unprotected.",
+                symbol, qty, qty * price, qty * worst_leg_price, min_notional,
+            )
+            return ""
+        return self._fmt(qty, step)
 
     def execute(self, decision: TradeDecision) -> Optional[Position]:
         """
@@ -166,7 +222,7 @@ class ExecutionEngine:
 
         price = self._get_price(decision.symbol)
         quantity = self._compute_quantity(decision.symbol, balance, price)
-        if quantity <= 0:
+        if not quantity:
             return None
 
         # Compute SL/TP prices
@@ -219,7 +275,9 @@ class ExecutionEngine:
                 symbol=decision.symbol,
                 direction=decision.direction,
                 entry_price=fill_price,
-                quantity=quantity,
+                # quantity is an exchange-ready STRING for the API calls above
+                # (see _fmt); Position stores it numerically for PnL maths.
+                quantity=float(quantity),
                 sl_price=sl_price,
                 tp_price=tp_price,
                 order_id=order_id,
@@ -227,7 +285,7 @@ class ExecutionEngine:
             self._open_positions[decision.symbol] = pos
             self._save_positions()
             logger.info(
-                "OPENED %s %s qty=%.5f @ %.4f | SL=%.4f TP=%.4f",
+                "OPENED %s %s qty=%s @ %.4f | SL=%.4f TP=%.4f",
                 decision.direction, decision.symbol, quantity, fill_price, sl_price, tp_price,
             )
             return pos
