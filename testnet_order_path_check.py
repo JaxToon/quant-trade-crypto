@@ -52,6 +52,11 @@ def main() -> None:
         return
 
     client = Client(settings.BINANCE_API_KEY, settings.BINANCE_API_SECRET, testnet=True)
+    # python-binance's testnet flag does NOT redirect spot REST (its docstring
+    # says "only available for vanilla options at the moment"), so pin it —
+    # same fix as strategy/execution.py. Without this the testnet key is sent
+    # to production and comes back -2015, which looks exactly like a bad key.
+    client.API_URL = Client.API_TESTNET_URL
     print(f"endpoint: {client.API_URL}")
     print(f"testnet : {settings.BINANCE_TESTNET}\n")
 
