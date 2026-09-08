@@ -167,3 +167,66 @@ def test_daily_loss_limit_halts_new_entries():
     c.usdt = 1_000_000.0 * 0.90                # -10%, past the 5% default
     res = m.mirror_open(_Pos())
     assert not res.ok and "halted" in res.reason.lower()
+
+
+# ── failure paths, found by testnet_failure_paths_check.py (2026-09-08) ────
+
+def test_unknown_symbol_is_refused_not_crashed():
+    """Binance returns None for an unlisted symbol rather than erroring;
+    indexing that produced a bare "'NoneType' object is not subscriptable",
+    which tells a caller nothing about what went wrong."""
+    class NoSuchSymbol(_Client):
+        def get_symbol_info(self, symbol):
+            return None
+
+    m = _mirror(NoSuchSymbol())
+    res = m.mirror_open(_Pos(symbol="NOTREALUSDT"))
+    assert not res.ok
+    assert "not listed" in res.reason or "unusable" in res.reason
+
+
+def test_rollback_does_not_cancel_another_positions_protection():
+    """A rollback used to cancel EVERY open order on the symbol, so undoing
+    one entry stripped the protection off an unrelated position and left THAT
+    one naked — trading one naked position for another."""
+    class WithExisting(_Client):
+        def __init__(self):
+            super().__init__(fail_protection=True)
+            self.resting = [{"orderId": 555, "type": "STOP_LOSS_LIMIT",
+                             "symbol": "BTCUSDT", "origQty": "0.001",
+                             "price": "1", "stopPrice": "1", "status": "NEW"}]
+
+        def get_open_orders(self, symbol=None):
+            return list(self.resting)
+
+        def cancel_order(self, symbol, orderId):
+            self.cancelled.append(orderId)
+            self.resting = [o for o in self.resting if o["orderId"] != orderId]
+
+    c = WithExisting()
+    m = _mirror(c)
+    m.mirror_open(_Pos())
+
+    assert 555 not in c.cancelled, "another position's protection must survive a rollback"
+
+
+def test_result_says_naked_when_the_rollback_itself_fails():
+    """The reason string used to claim "entry flattened" unconditionally —
+    including when the flatten had failed, which is exactly the case a caller
+    most needs to hear about."""
+    class FlattenAlsoFails(_Client):
+        def __init__(self):
+            super().__init__(fail_protection=True)
+            self._entry_done = False
+
+        def create_order(self, **kw):
+            if not self._entry_done:
+                self._entry_done = True
+                self.created.append(kw)
+                return {"orderId": 1, "fills": [{"price": "80000.0", "qty": kw["quantity"]}]}
+            raise RuntimeError("flatten rejected too")
+
+    m = _mirror(FlattenAlsoFails())
+    res = m.mirror_open(_Pos())
+    assert not res.ok
+    assert "NAKED" in res.reason.upper(), res.reason
