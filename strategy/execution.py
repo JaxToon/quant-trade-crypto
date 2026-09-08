@@ -74,6 +74,14 @@ class ExecutionEngine:
         self._trading_day: date = date.today()
         self._halted: bool = False
         self._load_positions()
+        # Local state is only a file; the exchange is the truth. Check them
+        # against each other before trading anything, so a position that lost
+        # its protection while the process was down is found now rather than
+        # after it has moved against us.
+        try:
+            self.reconcile_with_exchange()
+        except Exception as exc:
+            logger.error("Startup reconciliation failed (continuing): %s", exc)
         logger.info(
             "ExecutionEngine ready. Testnet=%s | %d open position(s) restored",
             settings.BINANCE_TESTNET, len(self._open_positions),
@@ -196,6 +204,112 @@ class ExecutionEngine:
             )
             return ""
         return self._fmt(qty, step)
+
+    def reconcile_with_exchange(self, auto_heal: bool = True) -> dict:
+        """Check local position state against what the exchange actually holds.
+
+        `_load_positions` restores from a local JSON file and nothing has ever
+        compared that to reality. The two drift for mundane reasons — this
+        deployment restarts often (39 times in one 25-day window), and a crash
+        between an order filling and the state being saved is enough. Two
+        specific divergences matter:
+
+          PROTECTION MISSING — the file says a position is guarded, but its
+            STOP_LOSS_LIMIT / TAKE_PROFIT_LIMIT are no longer on the exchange
+            (cancelled by hand, expired, or never placed because the process
+            died mid-sequence). The position is naked and nothing notices.
+            Healed by re-placing the protective orders.
+
+          ORPHANED ORDERS — protective orders resting for a symbol we no
+            longer track, usually left by a partial failure. They can fire
+            later and sell an asset the system believes it does not hold.
+            Healed by cancelling them.
+
+        Returns a report dict; logs loudly for anything it cannot fix, since
+        silence is the failure mode that made the naked-position bug so bad.
+        """
+        report = {"checked": 0, "unprotected": [], "reprotected": [], "orphans": [], "errors": []}
+        try:
+            tracked = set(self._open_positions)
+            symbols = tracked | {s for s in self._known_order_symbols()}
+            for symbol in symbols:
+                report["checked"] += 1
+                try:
+                    live = self._client.get_open_orders(symbol=symbol)
+                except Exception as exc:
+                    report["errors"].append(f"{symbol}: {exc}")
+                    continue
+                protective = [o for o in live
+                              if o.get("type") in ("STOP_LOSS_LIMIT", "STOP_LOSS",
+                                                   "TAKE_PROFIT_LIMIT", "TAKE_PROFIT")]
+                pos = self._open_positions.get(symbol)
+
+                if pos is None:
+                    if protective:
+                        report["orphans"].append(symbol)
+                        logger.warning(
+                            "RECONCILE %s: %d protective order(s) resting with no tracked "
+                            "position. Cancelling — these could fire later against an asset "
+                            "the system does not know it holds.", symbol, len(protective))
+                        if auto_heal:
+                            for o in protective:
+                                try:
+                                    self._client.cancel_order(symbol=symbol, orderId=o["orderId"])
+                                except Exception as exc:
+                                    report["errors"].append(f"{symbol} cancel: {exc}")
+                    continue
+
+                if not protective:
+                    report["unprotected"].append(symbol)
+                    logger.critical(
+                        "RECONCILE %s: tracked position (entry %.6f, qty %.8f) has NO "
+                        "protective orders on the exchange. It is running naked.",
+                        symbol, pos.entry_price, pos.quantity)
+                    if auto_heal and self._replace_protection(pos):
+                        report["reprotected"].append(symbol)
+        except Exception as exc:
+            report["errors"].append(str(exc))
+            logger.error("Reconciliation failed: %s", exc)
+
+        logger.info("RECONCILE done: %d symbol(s) checked, %d unprotected (%d re-protected), "
+                    "%d orphan set(s), %d error(s)",
+                    report["checked"], len(report["unprotected"]), len(report["reprotected"]),
+                    len(report["orphans"]), len(report["errors"]))
+        return report
+
+    def _known_order_symbols(self) -> list[str]:
+        """Symbols with resting orders on the exchange, so orphans belonging to
+        no tracked position are still found."""
+        try:
+            return sorted({o["symbol"] for o in self._client.get_open_orders()})
+        except Exception:
+            return []
+
+    def _replace_protection(self, pos: "Position") -> bool:
+        """Re-place the SL/TP pair for a position found running unprotected."""
+        try:
+            step, tick, _min_notional = self._symbol_filters(pos.symbol)
+            qty = self._fmt(pos.quantity, step)
+            sl_side = "SELL" if pos.direction == "LONG" else "BUY"
+            tp_side = sl_side
+            self._client.create_order(
+                symbol=pos.symbol, side=sl_side, type="STOP_LOSS_LIMIT", quantity=qty,
+                stopPrice=self._fmt(pos.sl_price, tick),
+                price=self._fmt(pos.sl_price * (0.999 if sl_side == "SELL" else 1.001), tick),
+                timeInForce="GTC")
+            self._client.create_order(
+                symbol=pos.symbol, side=tp_side, type="TAKE_PROFIT_LIMIT", quantity=qty,
+                stopPrice=self._fmt(pos.tp_price, tick),
+                price=self._fmt(pos.tp_price * (0.999 if tp_side == "SELL" else 1.001), tick),
+                timeInForce="GTC")
+            logger.warning("RECONCILE %s: protection re-placed (SL %.6f / TP %.6f).",
+                           pos.symbol, pos.sl_price, pos.tp_price)
+            return True
+        except Exception as exc:
+            logger.critical(
+                "RECONCILE %s: could not re-place protection (%s). Position is STILL naked "
+                "and needs manual attention.", pos.symbol, exc)
+            return False
 
     def _emergency_flatten(self, symbol: str, entry_side: str, quantity: str, order_id: str) -> None:
         """Undo a filled entry whose protective orders could not be placed.
