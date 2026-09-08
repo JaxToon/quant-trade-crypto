@@ -382,6 +382,20 @@ class PaperTradingLedger:
         if quantity * entry_price > max_notional:
             quantity = max_notional / entry_price
 
+        # Total-notional cap. The correlated-risk cap below governs RISK; this
+        # governs CAPITAL COMMITTED, and they come apart badly — halving risk
+        # per trade just admits twice as many positions, leaving total notional
+        # unchanged (measured: 17.2x -> 16.5x across a 4x risk cut). Spot
+        # cannot borrow, so without this the strategy is unexecutable there.
+        # 0 disables, preserving the historical behaviour exactly.
+        if settings.PORTFOLIO_MAX_NOTIONAL_MULTIPLE > 0:
+            open_notional = sum(p.quantity * p.entry_price for p in self.open_positions.values())
+            notional_cap = self._sizing_base() * settings.PORTFOLIO_MAX_NOTIONAL_MULTIPLE
+            if open_notional + quantity * entry_price > notional_cap:
+                return (f"Notional portfolio penuh (${open_notional:,.0f} terbuka + "
+                        f"${quantity * entry_price:,.0f} baru > ${notional_cap:,.0f} batas)")
+
+
         pos = PaperPosition(
             symbol=symbol,
             market=market,
