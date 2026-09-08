@@ -152,6 +152,22 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # Real OHLC candle timeframe SMC/FVG operate on (Binance kline interval string).
 # Order Blocks / FVG / market structure need real candle bodies+wicks — using
 # tick-level data here degenerates every "candle" to open==high==low==close.
+# Cap on TOTAL open notional across all positions, as a multiple of the
+# account. 0 disables (the historical behaviour).
+#
+# PORTFOLIO_MAX_CORRELATED_RISK_PCT caps RISK, not capital committed, and
+# those come apart badly. Measured over 730d/6 segments: cutting risk per
+# trade from 2.00% to 0.50% left peak total notional essentially unchanged
+# (17.2x -> 16.5x of the account) because the freed-up risk budget simply
+# admitted more positions (3,364 -> 8,015 trades). Only ~20-24% of replay
+# steps ever had everything open fitting inside the account.
+#
+# That matters because spot cannot borrow: strategy/live_mirror.py must
+# reject any decision whose notional exceeds the free balance. Capping risk
+# does not make the strategy spot-executable; capping notional is the lever
+# that actually does.
+PORTFOLIO_MAX_NOTIONAL_MULTIPLE = float(os.getenv("PORTFOLIO_MAX_NOTIONAL_MULTIPLE", "0"))
+
 # ── Live order mirroring (Path 1 -> real exchange) ────────────────────────
 # Path 1 (SMC/FVG -> PaperTradingLedger) is the path with actual evidence
 # behind it, and until now it could only ever write to a paper ledger.
