@@ -48,10 +48,22 @@ def _load(asset: str) -> list[dict]:
     return [t for t in d.get("closed_trades", []) if t.get("closed_at")]
 
 
+# A moving block bootstrap needs enough distinct windows to resample from.
+# With n=7 and block=5 there are only 3 possible windows and nblocks=1, so
+# every resample is 5 of the 7 values — the interval then describes a
+# different quantity than the reported mean and can exclude it outright.
+# That is exactly what produced a confident "stock short PROFITS" verdict on
+# n=7 (mean $433, CI [$202, $289]). Refuse rather than report nonsense.
+MIN_N_FOR_BOOTSTRAP = 5 * BLOCK
+
+
 def _block_bootstrap(vals: list[float], block: int = BLOCK, n: int = BOOT) -> tuple[float, float]:
     """95% CI for the mean, resampling contiguous blocks so serial
-    correlation between nearby trades survives the resample."""
-    if len(vals) < block:
+    correlation between nearby trades survives the resample.
+
+    Returns NaN when the sample is too small for the block size to give a
+    meaningful resample — see MIN_N_FOR_BOOTSTRAP."""
+    if len(vals) < max(block, MIN_N_FOR_BOOTSTRAP):
         return (float("nan"), float("nan"))
     nblocks = max(1, len(vals) // block)
     means = []
@@ -73,6 +85,10 @@ def _report(label: str, trades: list[dict]) -> tuple[float, float, float]:
     mean = statistics.mean(pnl)
     wr = sum(1 for p in pnl if p > 0) / len(pnl) * 100
     lo, hi = _block_bootstrap(pnl)
+    if lo != lo:   # NaN — sample too small for a meaningful block bootstrap
+        print(f"{label:<22}n={len(trades):<5}WR={wr:>5.1f}%  mean=${mean:>+8.2f}  "
+              f"{'':<26}  TOO FEW (need n>={MIN_N_FOR_BOOTSTRAP})")
+        return (mean, float("nan"), float("nan"))
     verdict = ("LOSES (CI entirely below 0)" if hi < 0 else
                "PROFITS (CI entirely above 0)" if lo > 0 else
                "UNRESOLVED (CI straddles 0)")
