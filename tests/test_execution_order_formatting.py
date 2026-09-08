@@ -107,3 +107,116 @@ def test_returns_empty_string_not_zero_when_unsizeable():
     eng = _engine(_StubClient(step="1", min_notional="5.0"))
     q = eng._compute_quantity("BTCUSDT", balance=0.01, price=80_000.0)
     assert q == "" and isinstance(q, str)
+
+
+# ── 4. the naked-position bug ─────────────────────────────────────────────
+# Observed live on testnet 2026-09-08: the entry market order FILLED, the
+# protective order was rejected (-1013 PRICE_FILTER), the exception was
+# swallowed, execute() returned None — and the account was left holding the
+# asset with no stop, no take-profit, and no Position record. The system did
+# not know it owned anything. With real money that is unbounded downside from
+# a failure the caller never sees.
+
+
+class _FailingProtectionClient(_StubClient):
+    """Entry fills; every subsequent protective order is rejected."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.orders = []
+        self.cancelled = []
+        self._entry_done = False
+
+    def get_open_orders(self, symbol):
+        return []
+
+    def cancel_order(self, symbol, orderId):
+        self.cancelled.append(orderId)
+
+    def create_order(self, **kw):
+        self.orders.append(kw)
+        if not self._entry_done:
+            self._entry_done = True
+            return {"orderId": 1, "fills": [{"price": "80000.0", "qty": kw["quantity"]}]}
+        if kw.get("type") == "MARKET":          # the rollback close
+            return {"orderId": 99, "fills": [{"price": "79990.0", "qty": kw["quantity"]}]}
+        from binance.exceptions import BinanceAPIException
+        raise BinanceAPIException(type("R", (), {"status_code": 400, "text": ""})(), 400,
+                                  '{"code":-1013,"msg":"Filter failure: PRICE_FILTER"}')
+
+
+def test_filled_entry_is_flattened_when_protection_fails():
+    """The entry must not be left naked. If the stop cannot be placed, the
+    position is closed immediately — accepting a small spread/fee loss,
+    because the alternative has no bounded downside."""
+    from strategy.consensus import TradeDecision
+    from strategy.agents import AgentDebate
+
+    client = _FailingProtectionClient()
+    eng = _engine(client)
+    eng._halted = False
+    eng._open_positions = {}
+    eng._daily_pnl = 0.0
+    from datetime import date
+    eng._trading_day = date.today()
+    eng._get_account_balance = lambda: 10_000.0
+    eng._get_price = lambda s: 80_000.0
+    eng._save_positions = lambda: None
+
+    d = TradeDecision(symbol="BTCUSDT", p_trade=0.99, execute=True, direction="LONG",
+                      debate=AgentDebate(symbol="BTCUSDT", bull_score=0.9, bull_reasoning="x",
+                                         bear_score=0.1, bear_reasoning="x", c_risk=0.0,
+                                         critic_reasoning="x"),
+                      gnn_signal=0.0)
+    pos = eng.execute(d)
+
+    assert pos is None, "execute() should report failure"
+    closes = [o for o in client.orders if o.get("type") == "MARKET" and o.get("side") == "SELL"]
+    assert closes, "a filled entry with failed protection MUST be flattened, not left naked"
+    assert "BTCUSDT" not in eng._open_positions
+
+
+def test_entry_price_averages_across_all_fills():
+    """A market order that walks the book returns several fills. Reading only
+    fills[0] understates the entry and corrupts every SL/TP distance and PnL
+    figure derived from it."""
+    class MultiFill(_StubClient):
+        def __init__(self):
+            super().__init__()
+            self.n = 0
+
+        def get_open_orders(self, symbol):
+            return []
+
+        def create_order(self, **kw):
+            self.n += 1
+            if self.n == 1:
+                return {"orderId": 1, "fills": [
+                    {"price": "80000.0", "qty": "0.001"},
+                    {"price": "80100.0", "qty": "0.001"},
+                ]}
+            return {"orderId": self.n}
+
+    from strategy.consensus import TradeDecision
+    from strategy.agents import AgentDebate
+    from datetime import date
+
+    client = MultiFill()
+    eng = _engine(client)
+    eng._halted = False
+    eng._open_positions = {}
+    eng._daily_pnl = 0.0
+    eng._trading_day = date.today()
+    eng._get_account_balance = lambda: 10_000.0
+    eng._get_price = lambda s: 80_000.0
+    eng._save_positions = lambda: None
+
+    d = TradeDecision(symbol="BTCUSDT", p_trade=0.99, execute=True, direction="LONG",
+                      debate=AgentDebate(symbol="BTCUSDT", bull_score=0.9, bull_reasoning="x",
+                                         bear_score=0.1, bear_reasoning="x", c_risk=0.0,
+                                         critic_reasoning="x"),
+                      gnn_signal=0.0)
+    pos = eng.execute(d)
+    assert pos is not None
+    assert pos.entry_price == pytest.approx(80_050.0), \
+        f"expected VWAP 80050, got {pos.entry_price} (reading fills[0] only?)"

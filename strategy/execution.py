@@ -197,6 +197,40 @@ class ExecutionEngine:
             return ""
         return self._fmt(qty, step)
 
+    def _emergency_flatten(self, symbol: str, entry_side: str, quantity: str, order_id: str) -> None:
+        """Undo a filled entry whose protective orders could not be placed.
+
+        Cancels anything that did land, then closes the position with a market
+        order in the opposite direction. This deliberately accepts a small
+        realised loss (spread + fees) because the alternative — holding an
+        unprotected position the system has no record of — has no bounded
+        downside at all.
+
+        If the flatten itself fails there is nothing further this process can
+        do automatically, so it logs at CRITICAL: that state needs a human.
+        """
+        try:
+            for o in self._client.get_open_orders(symbol=symbol):
+                try:
+                    self._client.cancel_order(symbol=symbol, orderId=o["orderId"])
+                except Exception:
+                    pass
+            close_side = "SELL" if entry_side == "BUY" else "BUY"
+            self._client.create_order(symbol=symbol, side=close_side,
+                                      type="MARKET", quantity=quantity)
+            logger.warning(
+                "ROLLBACK %s: entry %s filled but protection failed — position flattened "
+                "with a %s market order (entry order_id=%s).",
+                symbol, entry_side, close_side, order_id,
+            )
+        except Exception as exc:
+            logger.critical(
+                "ROLLBACK FAILED for %s: entry filled, protection failed, AND the "
+                "flatten failed (%s). There is now an UNPROTECTED position on the "
+                "exchange that this process cannot close. HUMAN INTERVENTION REQUIRED.",
+                symbol, exc,
+            )
+
     def execute(self, decision: TradeDecision) -> Optional[Position]:
         """
         Attempt to open a position based on a TradeDecision.
@@ -237,6 +271,20 @@ class ExecutionEngine:
             side = "SELL"
             sl_side = "BUY"
 
+        # Every price sent to the exchange must be a multiple of the symbol's
+        # tickSize. The old code used round(x, 4), which happens to work for
+        # the stop TRIGGER but not for the limit price derived from it:
+        # round(76950.1 * 0.999, 4) = 76873.1499, not a multiple of 0.01, and
+        # the exchange rejects it with -1013 PRICE_FILTER. Snap everything.
+        _, tick, _ = self._symbol_filters(decision.symbol)
+        sl_price = float(self._fmt(sl_price, tick))
+        tp_price = float(self._fmt(tp_price, tick))
+        sl_limit = self._fmt(sl_price * (0.999 if side == "BUY" else 1.001), tick)
+        tp_side = "SELL" if side == "BUY" else "BUY"
+        tp_limit = self._fmt(tp_price * (0.999 if tp_side == "SELL" else 1.001), tick)
+
+        order_id = ""
+        entry_filled = False
         try:
             # Entry market order
             order = self._client.create_order(
@@ -246,7 +294,21 @@ class ExecutionEngine:
                 quantity=quantity,
             )
             order_id = str(order.get("orderId", ""))
-            fill_price = float(order.get("fills", [{}])[0].get("price", price))
+            entry_filled = True
+
+            # Average across ALL fills. Reading fills[0] only — as this did —
+            # records the first price level of a market order that walked the
+            # book, understating the real entry and corrupting every SL/TP
+            # distance and PnL figure computed from it.
+            fills = order.get("fills") or []
+            filled_qty = sum(float(f["qty"]) for f in fills)
+            if filled_qty > 0:
+                fill_price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / filled_qty
+                if len(fills) > 1:
+                    logger.info("%s entry filled across %d price levels, VWAP %.6f",
+                                decision.symbol, len(fills), fill_price)
+            else:
+                fill_price = price
 
             # Server-side stop-loss (STOP_LOSS_LIMIT)
             self._client.create_order(
@@ -254,20 +316,19 @@ class ExecutionEngine:
                 side=sl_side,
                 type="STOP_LOSS_LIMIT",
                 quantity=quantity,
-                stopPrice=str(sl_price),
-                price=str(round(sl_price * (0.999 if side == "BUY" else 1.001), 4)),
+                stopPrice=self._fmt(sl_price, tick),
+                price=sl_limit,
                 timeInForce="GTC",
             )
 
             # Take-profit (TAKE_PROFIT_LIMIT)
-            tp_side = "SELL" if side == "BUY" else "BUY"
             self._client.create_order(
                 symbol=decision.symbol,
                 side=tp_side,
                 type="TAKE_PROFIT_LIMIT",
                 quantity=quantity,
-                stopPrice=str(tp_price),
-                price=str(round(tp_price * (0.999 if tp_side == "SELL" else 1.001), 4)),
+                stopPrice=self._fmt(tp_price, tick),
+                price=tp_limit,
                 timeInForce="GTC",
             )
 
@@ -292,6 +353,18 @@ class ExecutionEngine:
 
         except BinanceAPIException as exc:
             logger.error("Order failed for %s: %s", decision.symbol, exc)
+            # THE important half. Observed on testnet 2026-09-08: the entry
+            # market order FILLED, the protective order was then rejected
+            # (-1013 PRICE_FILTER), the exception landed here, execute()
+            # returned None — and the account was left holding the asset with
+            # NO stop, NO take-profit, and NO Position record. A naked,
+            # unprotected position the system did not know it owned. With real
+            # money that is unbounded downside from a bug the caller never sees.
+            #
+            # So if the entry filled but protection did not, flatten it
+            # immediately rather than returning as though nothing happened.
+            if entry_filled:
+                self._emergency_flatten(decision.symbol, side, quantity, order_id)
             return None
 
     def close_position(self, symbol: str, exit_price: float, reason: str) -> None:
