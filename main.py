@@ -72,6 +72,7 @@ from risk.hmm_regime import HMM_CHECKPOINT, RegimeDetector
 from strategy.consensus import evaluate_trade
 from strategy.entry_insight import build_entry_insight
 from strategy.execution import ExecutionEngine
+from strategy.live_mirror import LiveOrderMirror
 
 # ── Shared state ──────────────────────────────────────────────────────────
 # Keyed by (symbol, timeframe) — SMC/FVG runs independently per layer
@@ -92,6 +93,11 @@ _latest_indicators: dict[tuple[str, str], dict] = {}
 _latest_closed_indicators: dict[tuple[str, str], dict] = {}
 _shutdown = threading.Event()
 _paper_ledger = PaperTradingLedger() if settings.PAPER_TRADING_ENABLED else None
+# Mirrors Path 1's paper decisions onto a real exchange. Inert unless
+# LIVE_TRADING_ENABLED is set, and refuses to arm against a non-testnet
+# endpoint without LIVE_TRADING_CONFIRM_REAL_MONEY as well — see
+# strategy/live_mirror.py for why one flag was never going to be enough.
+_live_mirror = LiveOrderMirror()
 
 # Rolling window for the dashboard's session charts (equity curve, price
 # movement). One point per decision-loop cycle (~60s) — 5000 points is
@@ -431,6 +437,31 @@ def _run_paper_trading(insights: dict, prices: dict) -> dict:
             deriv_already_open = (symbol, "derivative", tf) in _paper_ledger.open_positions
             spot_reason = _paper_ledger.maybe_open(symbol, "spot", spot, timeframe=tf, current_price=current_price)
             deriv_reason = _paper_ledger.maybe_open(symbol, "derivative", derivative, timeframe=tf, current_price=current_price)
+
+            # Mirror to the exchange anything the ledger actually opened. The
+            # ledger stays the only thing that DECIDES; this just reproduces
+            # its choice with the same quantity, stop and target, so live
+            # behaviour matches the validated simulation rather than
+            # approximating it. No-op while the mirror is disabled.
+            if _live_mirror.enabled:
+                for market, was_open in (("spot", spot_already_open),
+                                         ("derivative", deriv_already_open)):
+                    key = (symbol, market, tf)
+                    if was_open or key not in _paper_ledger.open_positions:
+                        continue
+                    try:
+                        result = _live_mirror.mirror_open(_paper_ledger.open_positions[key])
+                        if not result.ok:
+                            # The paper position stands either way: the ledger
+                            # is the record of what the STRATEGY did, and
+                            # silently deleting it would corrupt the evidence
+                            # base. Log the divergence instead so paper and
+                            # exchange can be reconciled deliberately.
+                            logger.warning("MIRROR skipped %s %s [%s]: %s",
+                                           symbol, market, tf, result.reason)
+                    except Exception as exc:
+                        logger.error("MIRROR error for %s %s [%s]: %s",
+                                     symbol, market, tf, exc, exc_info=True)
             if spot_reason or deriv_reason:
                 rejections[insight_key] = {"spot": spot_reason, "derivative": deriv_reason}
                 confidence = ins.get("confidence", 0.0)
