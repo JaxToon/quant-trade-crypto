@@ -152,6 +152,31 @@ SMC_LOOKBACK_CANDLES = 100  # How many candles to analyze for SMC patterns
 # Real OHLC candle timeframe SMC/FVG operate on (Binance kline interval string).
 # Order Blocks / FVG / market structure need real candle bodies+wicks — using
 # tick-level data here degenerates every "candle" to open==high==low==close.
+# ── Live order mirroring (Path 1 -> real exchange) ────────────────────────
+# Path 1 (SMC/FVG -> PaperTradingLedger) is the path with actual evidence
+# behind it, and until now it could only ever write to a paper ledger.
+# strategy/live_mirror.py can reproduce its decisions as real orders.
+#
+# THREE independent switches guard real money, on purpose. One forgotten
+# environment variable should never be the only thing separating a test run
+# from a funded account:
+#   1. LIVE_TRADING_ENABLED must be true at all
+#   2. BINANCE_TESTNET must be false to leave testnet
+#   3. LIVE_TRADING_CONFIRM_REAL_MONEY must ALSO be true
+# The mirror refuses to arm against a non-testnet endpoint unless (3) is set.
+LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"
+LIVE_TRADING_CONFIRM_REAL_MONEY = os.getenv("LIVE_TRADING_CONFIRM_REAL_MONEY", "false").lower() == "true"
+
+# Halt NEW live entries once the day is this far down, in percent of the
+# balance at the day's first check. 0 disables.
+#
+# Path 1 has never had a loss limit of any kind: DAILY_DRAWDOWN_LIMIT is
+# enforced only in strategy/execution.py, which is Path 2 and disabled. So a
+# losing streak on the path that would actually hold money has run unchecked
+# by design. Open positions keep their exchange-held stops when this trips;
+# only new entries stop.
+LIVE_TRADING_DAILY_LOSS_LIMIT_PCT = float(os.getenv("LIVE_TRADING_DAILY_LOSS_LIMIT_PCT", "5.0"))
+
 # Base URL for Binance REST (klines) calls.
 #
 # Defaults to data-api.binance.vision, NOT api.binance.com, because the
