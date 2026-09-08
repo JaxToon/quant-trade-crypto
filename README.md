@@ -620,6 +620,8 @@ This is expected right now — see TL;DR. `TRADE_THRESHOLD=0.55` sits close to t
 ```
 TraderStuff/
 ├── main.py                    # Main orchestrator — runs both decision paths + dashboard
+├── checks/                 # Live-exchange verification scripts (talk to a real venue;
+│                           #   run as `python -m checks.NAME`). tests/ is the offline suite.
 ├── backtest.py                # Historical validation: is/oos, multi-regime, GNN ablation, multi-timeframe concurrency, slippage sweep
 ├── reconcile_downtime.py      # Reconciles paper-ledger open positions against real price history after a shutdown
 ├── start_system.sh / stop_system.sh   # One-command start/stop for both crypto + stock processes
