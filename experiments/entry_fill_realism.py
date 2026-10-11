@@ -50,10 +50,15 @@ PRE-REGISTERED DECISION RULE (fixed before running):
     resting limit orders, and the cost is the unfilled signals.
   - If both survive, the bias is real but not fatal; report its size.
 
-Usage: python -m experiments.entry_fill_realism
+Usage: python -m experiments.entry_fill_realism [--fee 0.001]
+
+--fee sets the per-side fee (default 0.003822, Tokocrypto's published USDT
+schedule). Added 2026-10-11 to ask whether a cheap venue rescues the
+realistic-fill arms.
 """
 from __future__ import annotations
 
+import argparse
 import importlib
 import statistics
 
@@ -203,7 +208,7 @@ def main():
         print(f"  seg{i} done", flush=True)
 
     print(f"\n{'=' * 92}")
-    print(f"ENTRY FILL REALISM — {days}d, {n_seg} segments, Tokocrypto fee {FEE*100:.4f}%/side, "
+    print(f"ENTRY FILL REALISM — {days}d, {n_seg} segments, fee {FEE*100:.4f}%/side, "
           f"spot config")
     print(f"{'=' * 92}")
     if bias_r:
@@ -261,4 +266,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--fee", type=float, default=FEE, help="per-side fee as a fraction")
+    FEE = _ap.parse_args().fee
     main()
