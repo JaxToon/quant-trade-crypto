@@ -165,8 +165,7 @@ def main():
     print("* current behaviour.  lev = TOTAL open notional / account.  "
           "spot-OK = steps where it all fit.")
 
-    print("
-SPOT-VIABLE CANDIDATES (spot-OK >= 95%, profitable >= 5/6 segments):")
+    print("\nSPOT-VIABLE CANDIDATES (spot-OK >= 95%, profitable >= 5/6 segments):")
     found = False
     for c_ in CAPS:
         if not tot[c_]:
