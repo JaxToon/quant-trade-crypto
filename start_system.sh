@@ -118,43 +118,21 @@ echo ""
 # recorded debate decisions across this project's history, zero ever
 # executed a trade, but each cycle still burned 3 OpenAI calls/symbol.
 # Path 1 (SMC/FVG paper trading) is untouched by this. See settings.py
-# and RESEARCH_NOTES.md. Set ENABLE_LLM_CONSENSUS=true below to re-enable.
+# and RESEARCH_NOTES.md. Set ENABLE_LLM_CONSENSUS=true in system_env.sh to re-enable.
 #
 # Correlation cap: default 0.08 (not the backtest-favored 0.12/CAP_1.5X --
 # see RESEARCH_NOTES.md "Live evidence vs backtest" for why that's still
 # pending, not deployed).
-# SPOT-VIABLE CONFIGURATION, live from 2026-09-08.
-#
-# The production sizing (2% risk, no notional cap) is not deployable: it
-# needs up to 17x the account in total open notional, and spot cannot borrow.
-# Measured over 730d/6 segments, the combination below is 100%
-# spot-executable, profitable in 6/6 segments, and cuts worst-segment
-# drawdown from 69.1% to 9.7%. It costs trade count and absolute return
-# (+394% over 730d instead of an unattainable +2,244%).
-#
-# Neither half works alone: capping risk leaves total notional unchanged
-# because the freed budget admits more positions, and capping notional at
-# 1.0x blocks everything because one production-sized position already
-# exceeds the account. See RESEARCH_NOTES.md and
-# experiments/notional_cap_spot_viability.py.
-#
-# NOTE this changes what the live paper ledger records. Ledger history splits
-# at this timestamp: everything before is the leveraged configuration.
-SPOT_CFG="PAPER_TRADING_RISK_PCT=0.0025 PORTFOLIO_MAX_NOTIONAL_MULTIPLE=1.0"
-
-# LiveOrderMirror: mirrors each paper decision onto Binance TESTNET so the
-# order path runs against a real exchange with fake money. Real money needs
-# BINANCE_TESTNET=false AND LIVE_TRADING_CONFIRM_REAL_MONEY=true as well --
-# neither is set here, and the mirror refuses to arm without both.
-MIRROR_CFG="LIVE_TRADING_ENABLED=true"
+# Launch environment (spot sizing, testnet mirror, Path 2 off) lives in
+# system_env.sh, shared with watchdog.sh so a self-healed process comes back on
+# the same configuration.
+. "$(dirname "${BASH_SOURCE[0]}")/system_env.sh"
 
 crypto_ok=true
-launch_and_verify "crypto" "$CRYPTO_PORT" "ENABLE_LLM_CONSENSUS=false $SPOT_CFG $MIRROR_CFG" "backtrack_logs/main_run.log" || crypto_ok=false
+launch_and_verify "crypto" "$CRYPTO_PORT" "$CRYPTO_ENV" "backtrack_logs/main_run.log" || crypto_ok=false
 
-# Stock runs the same sizing for consistency, but NOT the mirror: the
-# exchange is Binance, which has no NASDAQ symbols to mirror to.
 stock_ok=true
-launch_and_verify "stock" "$STOCK_PORT" "ENABLE_LLM_CONSENSUS=false $SPOT_CFG ASSET_TYPE=stock MARKET_SOURCE=yfinance" "backtrack_logs/main_run_stock_yfinance.log" || stock_ok=false
+launch_and_verify "stock" "$STOCK_PORT" "$STOCK_ENV" "backtrack_logs/main_run_stock_yfinance.log" || stock_ok=false
 
 echo ""
 echo "=== Final status ==="

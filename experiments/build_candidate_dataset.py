@@ -30,7 +30,10 @@ Label design (matches the reviewed playbook's spec):
   "rejected" candidate                          -> "rejected" (never got
     capital -- a distinct category from a resolved loss, not folded into it)
 
-Usage: python build_candidate_dataset.py [--asset-type crypto|stock]
+Usage: python -m experiments.build_candidate_dataset [--asset-type crypto|stock]
+
+(Moved from the repo root 2026-10-11. Part of the meta-labeling direction
+that was set aside on 2026-08-22.)
 """
 from __future__ import annotations
 

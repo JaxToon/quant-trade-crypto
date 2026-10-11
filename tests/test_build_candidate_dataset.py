@@ -8,7 +8,7 @@ usefulness does.
 """
 from __future__ import annotations
 
-from build_candidate_dataset import build_dataset
+from experiments.build_candidate_dataset import build_dataset
 
 
 def _candidate(symbol="BTCUSDT", market="spot", timeframe="5m", decision="accepted",

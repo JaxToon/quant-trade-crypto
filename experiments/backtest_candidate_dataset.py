@@ -25,7 +25,10 @@ perfect stand-in for live execution fidelity. Output is saved to
 future training step can weight or filter by source explicitly rather than
 silently blending them.
 
-Usage: python backtest_candidate_dataset.py [--days N]
+Usage: python -m experiments.backtest_candidate_dataset [--days N]
+
+(Moved from the repo root 2026-10-11. Part of the meta-labeling direction
+that was set aside on 2026-08-22.)
 """
 from __future__ import annotations
 
@@ -37,7 +40,7 @@ from datetime import datetime
 
 from backtest import CRYPTO_TICKERS, fetch_candles
 from backtrack.paper_trading import PaperTradingLedger
-from build_candidate_dataset import build_dataset, summarize
+from experiments.build_candidate_dataset import build_dataset, summarize
 from config import settings
 from strategy.entry_insight import build_entry_insight
 from strategy.fvg_analyzer import FairValueGapAnalyzer
