@@ -21,6 +21,7 @@ live in the script's output, in `docs/FINDINGS_LOG.md`, and in
 | Script | Question it asks |
 |---|---|
 | `audit_news_coverage` | News/event coverage audit -- diagnoses the stock-vs-crypto Macro_Event imbalance found live (2026-08-21): 255 crypto Token<-Macro_Event edges vs. 4 stock ones, despite equal token counts (8 crypto, 8 stock). |
+| `backtest_candidate_dataset` | Historical bootstrap for the candidate-trade dataset (v3 track, Stage 1 cont'd) -- builds thousands of candidate rows from real historical replay in minutes, instead of waiting weeks for live paper trading to ... |
 | `backtest_concurrence_experiment` | Timeframe concurrence experiment — Path 1 (SMC/FVG paper trading) ONLY. Step 2 of the agreed entry-selection research roadmap (see README), run crypto-first per the standing rule: crypto establishes or disproves the ... |
 | `backtest_htf_bias_experiment` | Higher-timeframe (HTF) bias filter experiment — Path 1 (SMC/FVG paper trading) ONLY. |
 | `backtest_meta_filter_experiment` | Cheap gate before Stage 2 (v3 track) -- tests whether a SIMPLE RULE combining already-validated signals (full timeframe concurrence, direction) beats the current baseline (v2.5, unfiltered), before committing to a ... |
@@ -34,6 +35,7 @@ live in the script's output, in `docs/FINDINGS_LOG.md`, and in
 | `breakeven_lookahead_check` | Is the BE_0.5R breakeven "edge" real, or intra-candle look-ahead bias? |
 | `breakeven_under_slippage` | The deploy gate for the breakeven finding: does its edge survive the one cost we have actually MEASURED but never modelled? |
 | `breakeven_vs_capacity_disambiguation` | Is BE_0.5R (breakeven stop at 0.5R) a genuine exit improvement, or just another proxy for the correlation-cap capacity lever? |
+| `build_candidate_dataset` | Stage 1 (cont'd), entry-selection research line: offline dataset builder. Joins the candidate-trade log (dashboard/candidate_trades_{asset_type}.json -- features at decision time, see main.py's _record_candidate()) ... |
 | `combo_multiregime_robustness` | Extends the full 11-filter multi-regime robustness pass to COMBINATIONS, using the exact same "must win the segment on PnL, across all 6 segments of ~2 years of real data" bar established in ... |
 | `confluence_matrix_ab_experiment` | Pre-registered A/B/combination-matrix experiment: does layering established, non-ML technical confluence filters on top of the existing SMC/FVG entry pipeline improve trade quality — individually or combined? Run ... |
 | `correlation_cap_drawdown_sweep` | Can a TIGHTER correlation cap bring drawdown into survivable territory? |
@@ -84,3 +86,5 @@ live in the script's output, in `docs/FINDINGS_LOG.md`, and in
 | `ta_indicators` | Causal (no-lookahead) technical-indicator series, shared by every AB/matrix experiment script in this repo that needs more than the single-latest-value helpers in train_gnn.py (_rsi, _ema, _macd, _bollinger only ... |
 | `trailing_breakeven_robustness` | Tests dynamic stop movement (breakeven + ATR trailing) against baseline — the one exit-side lever this project has never evaluated. |
 | `vwap_confluence_ab_experiment` | Pre-registered A/B experiment: does adding a VWAP directional-confluence filter to the existing SMC/FVG entry pipeline improve trade quality? |
+
+Raw outputs of past runs are in `backtrack_logs/experiment_outputs/` (local, gitignored), indexed by `INDEX.md` there.

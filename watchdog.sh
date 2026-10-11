@@ -25,6 +25,10 @@ LAUNCH_TIMEOUT_SECONDS=150
 POLL_INTERVAL_SECONDS=5
 LOG=backtrack_logs/watchdog.log
 
+# Same launch environment as start_system.sh. This file used to hard-code a
+# copy without the spot sizing or the testnet mirror (fixed 2026-10-11).
+. ./system_env.sh
+
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "$(ts) $1" | tee -a "$LOG"; }
 
@@ -110,13 +114,13 @@ fi
 if port_is_up 8080; then
   : # crypto healthy, nothing to log every run
 else
-  heal "crypto" 8080 "ENABLE_LLM_CONSENSUS=false" "backtrack_logs/main_run.log" "crypto" || overall_ok=false
+  heal "crypto" 8080 "$CRYPTO_ENV" "backtrack_logs/main_run.log" "crypto" || overall_ok=false
 fi
 
 if port_is_up 8081; then
   : # stock healthy, nothing to log every run
 else
-  heal "stock" 8081 "ENABLE_LLM_CONSENSUS=false ASSET_TYPE=stock MARKET_SOURCE=yfinance" "backtrack_logs/main_run_stock_yfinance.log" "stock" || overall_ok=false
+  heal "stock" 8081 "$STOCK_ENV" "backtrack_logs/main_run_stock_yfinance.log" "stock" || overall_ok=false
 fi
 
 [ "$overall_ok" = true ]

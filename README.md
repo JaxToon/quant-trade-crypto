@@ -520,7 +520,7 @@ Consequences for how this repo should be used:
 
 - `trader.log`: Main system log, accumulates across restarts (append mode) — the reliable source for "what happened since the system started," unlike...
 - `backtrack_logs/main_run.log`: gets truncated on every restart if you're launching via a redirect (`python main.py > backtrack_logs/main_run.log`)
-- `backtrack_logs/`: paper-trading ledgers, backtest results, execution position state
+- `backtrack_logs/`: paper-trading ledgers (`paper_ledger_{crypto,stock}.json`) and execution position state. Raw experiment output lives in `backtrack_logs/experiment_outputs/` (indexed by its `INDEX.md`); old run logs, old backtest ledgers and the archived candidate datasets are gzip-compressed under `backtrack_logs/archive/`. All of it is gitignored.
 - `dashboard/status.json`, `dashboard/history.json`, `dashboard/consensus_history.json`: real-time and historical dashboard state, persisted across restarts
 
 ### Neo4j Queries
@@ -600,6 +600,7 @@ TraderStuff/
 ├── backtest.py                # Historical validation: is/oos, multi-regime, GNN ablation, multi-timeframe concurrency, slippage sweep
 ├── reconcile_downtime.py      # Reconciles paper-ledger open positions against real price history after a shutdown
 ├── start_system.sh / stop_system.sh   # One-command start/stop for both crypto + stock processes
+├── system_env.sh              # Launch environment (sizing, testnet mirror) shared by start_system.sh and watchdog.sh
 ├── train_gnn.py                # GNN training from historical candles (separate checkpoint per ASSET_TYPE)
 ├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
 ├── slippage_report.py         # Reads live stop-slippage observations; refuses conclusions below n=30
