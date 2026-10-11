@@ -1,0 +1,20 @@
+  t["ret"] = t["pnl_dollars"].to_numpy() / base
+  return umr_sum(a, axis, dtype, out, keepdims, initial, where)
+  t["ret"] = t["pnl_dollars"].to_numpy() / base
+  return umr_sum(a, axis, dtype, out, keepdims, initial, where)
+candidate       CI>0  >null95  DD<40%  Calmar>BH  eligible  Sharpe
+C1 SMA200        yes      yes      no        yes        no    1.25
+C2 TSMOM4W       yes      yes      no        yes        no    1.54
+C3 DONCH-BTC     yes      yes     yes         no        no    1.27
+C4 DONCH-VT      yes      yes     yes        yes       yes    1.64
+C5 DONCH-EW      yes      yes     yes        yes       yes    1.56
+C6 XSMOM3        yes      yes      no         no        no    1.22
+C7 RSI2           no       no     yes         no        no    0.09
+C8 SMC-1H         no      n/a      no         no        no   -1.28
+C9 SMC-4H         no      n/a      no         no        no   -1.33
+C10 SMC-1D        no      n/a      no         no        no   -1.61
+
+BH-EW Calmar on DEV: 0.94
+SELECTED: C4 DONCH-VT
+Deflated Sharpe (N=10): 0.1135
+wrote research/results/selection.json
