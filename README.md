@@ -8,13 +8,14 @@ Combines **Smart Money Concepts (SMC)**, **Fair Value Gap (FVG)** analysis, a **
 
 - **What it is:** an SMC/FVG signal engine with a $10k virtual paper ledger (Path 1), plus a disabled LLM-debate path (Path 2), a retired GNN and a Neo4j knowledge graph. `./start_system.sh` (or `python main.py`) starts it; dashboard at `http://localhost:8080`. Requires Neo4j running first.
 - **Why there is no edge (measured 2026-10-11):** the paper ledger books every entry at the FVG **midpoint** (`backtrack/paper_trading.py:281`), but `is_valid_entry()` only lets a signal fire while price is in the half of the gap that is *worse* for the trade (mitigation ≤ 50%). So every long was booked below the market price and every short above it: on average **+0.52R per trade in the backtest** (better than market on 100% of 334 entries) and **+0.53% of price live** (98 of 103 entries).
-  - Backtest at realistic fills (730d, 6 segments, Tokocrypto fees): midpoint booking +$7,065 (4/6 segments profitable); **market fill −$26,573 (0/6)**; resting limit at the midpoint −$8,198 (0/6). See `experiments/entry_fill_realism.py`.
+  - Backtest at realistic fills (730d, 6 segments, Tokocrypto fees): midpoint booking +$7,065 (4/6 segments profitable); **market fill −$26,573 (0/6)**; resting limit at the midpoint −$8,198 (0/6). A cheap venue does not rescue it: at a 0.1% fee the market-fill arm loses −$54,728 in 0/6 segments with a 118.8% worst drawdown. See `experiments/entry_fill_realism.py` (`--fee`).
   - Live paper record re-priced at the real market fill: **booked +$4,375 becomes −$18,653.** LONG 95% CI [−$98.74, +$73.87], unresolved. SHORT [−$697.24, −$236.03], a loss.
   - The market-fill arm wins **63.1%** of its trades and still loses money. Win rate is the wrong objective; what counts is expectancy after costs.
 - **Other weaknesses, each measured:** about 150 trials run on one rolling window with no untouched holdout, and the live LONG result fails the deflated Sharpe test at that trial count. The live month was a +28.7% rally. Real venue fees are 0.3822% per side, 3.8x the modelled 0.1%. The 2-year multi-regime backtests cover 1h only (yfinance caps 5m/15m at 60 days), while live also traded 5m and 15m, and live 15m lost money. The GNN was gated out on 98.9% of calls and is retired. Path 2 produced zero trades in 3,050+ decisions.
 - **What still holds:** signal detection is causal (no look-ahead). The execution plumbing is real and testnet-proven: exchange-held OCO protection, startup reconciliation against the exchange, rollback when protection fails, a thread-safe ledger, and live slippage instrumentation (stop slippage mean 0.119%, n=31).
 - **Real money:** `strategy/live_mirror.py` can place Tokocrypto spot orders (long only) but **must stay unarmed**. `start_system.sh` enables the mirror against Binance **testnet** only. Real money would additionally need Tokocrypto API keys, `EXCHANGE_VENUE=tokocrypto` and `LIVE_TRADING_CONFIRM_REAL_MONEY=true`, and none of those are set. Binance itself is DNS-blocked on the development network.
 - **If research continues, in this order:** (1) fix the ledger's fill model; (2) re-run one baseline on Binance-native data (5m/15m history back to 2022 is available from `data-api.binance.vision`) with the newest months locked away as a holdout; (3) make targets several times the 0.76% round-trip cost, e.g. on higher timeframes; (4) benchmark against buy-and-hold and against random entries with the same exits; (5) count trials and report deflated Sharpe instead of p < 0.05.
+- **Evaluation and improvement plan (Indonesian):** [`docs/EVALUASI_2026-10-11.md`](docs/EVALUASI_2026-10-11.md) is the full evaluation with every claim labelled measured or inferred, and [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md) is the phased plan with go/no-go gates.
 - **Every figure recorded before 2026-10-11 was booked at the midpoint and is optimistic.** The full history of findings is kept in [`docs/FINDINGS_LOG.md`](docs/FINDINGS_LOG.md), every experiment script is indexed in [`experiments/README.md`](experiments/README.md), and the full write-ups are in `RESEARCH_NOTES.md` (local, not pushed).
 
 ---
@@ -605,6 +606,8 @@ TraderStuff/
 ├── DEPLOYMENT.md               # Persistence contract, cloud/AuraDB migration notes
 ├── slippage_report.py         # Reads live stop-slippage observations; refuses conclusions below n=30
 ├── docs/
+│   ├── EVALUASI_2026-10-11.md   # Full evaluation (Indonesian), every claim labelled
+│   ├── IMPROVEMENT_PLAN.md      # Phased improvement plan with gates (Indonesian)
 │   └── FINDINGS_LOG.md         # Chronological record of every finding (the README's former TL;DR, verbatim)
 ├── experiments/                # Research/validation scripts, run via `python -m experiments.<name>`
 │   └── README.md               # Index: one line per script, what question it asks
