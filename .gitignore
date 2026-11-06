@@ -21,3 +21,9 @@ dashboard/candidate_dataset*.json
 RESEARCH_NOTES.md
 data/stock_ohlcv_1m/
 data/klines/
+.claude/settings.local.json
+
+# Local tool output, not part of the system
+.playwright-cli/
+graphify-out/
+portfolio_screenshots/

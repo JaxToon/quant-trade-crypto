@@ -1,191 +1,180 @@
-# Rencana Improvement TraderStuff (dibuat 11 Oktober 2026)
+# Rencana Improvement v2 (dievaluasi ulang 11 Oktober 2026)
 
-Dari fondasi sampai hasil akhir: **profit yang terbukti**, **teknik trade yang lebih
-baik**, dan **dashboard yang jujur dan enak dipakai**.
+Rencana ini menggantikan v1 (masih bisa dilihat di git history, commit `7f9035e`).
+Dasarnya:
 
-Dasar rencana ini adalah [`EVALUASI_2026-10-11.md`](EVALUASI_2026-10-11.md).
-Label yang dipakai sama: **[TERUKUR]**, **[DUGAAN]**, **[SUMBER LUAR]**.
+- [`EVALUASI_2026-10-11.md`](EVALUASI_2026-10-11.md): kenapa sistem lama tidak punya edge.
+- [`RISET_STRATEGI_2026-10.md`](RISET_STRATEGI_2026-10.md): riset luar + uji 10 strategi dengan aturan yang dikunci.
 
----
-
-## Tujuan akhir (kapan proyek ini disebut "berhasil")
-
-1. Ada strategi yang **untung setelah semua biaya, di harga pasar asli**, dan terbukti
-   di data yang belum pernah dilihat (holdout).
-2. Hasil trading nyata **cocok** dengan hasil simulasi.
-3. Dashboard menampilkan angka yang **jujur**: setelah biaya, dengan pembanding, dengan
-   peringatan kalau sampelnya masih kecil.
-4. Uang asli masuk **bertahap**: kecil dulu, dengan pengaman otomatis.
+Label: **[TERUKUR]**, **[DUGAAN]**, **[SUMBER LUAR]**.
 
 ---
 
-## 3 aturan main
+## Ringkasan dalam 5 baris
 
-1. **Ekspektasi per trade setelah biaya** adalah ukuran utama, bukan win rate.
-   Buktinya [TERUKUR]: market order dengan win rate 63.1% tetap rugi $26,573.
-2. **Satu hipotesis, ditulis dulu, baru diuji.** Data holdout dibuka satu kali per
-   kandidat final.
-3. **Kalau tidak ada yang lolos, kita berhenti.** "Tidak ada edge" adalah hasil yang sah,
-   dan hasil itu menyelamatkan uang.
+1. **SMC dipensiunkan** sebagai strategi trading. Ia yang terburuk di setiap tes, dan dua versinya bangkrut. [TERUKUR]
+2. **Trend following** (Donchian ensemble, C4) adalah kandidat terbaik. [TERUKUR]
+   Tapi C4 rugi −3.9% di data ujian 2025–2026, jadi **belum terbukti untung**.
+3. Data historis sudah "terpakai". **Bukti baru hanya bisa datang dari waktu ke depan**:
+   jalankan C4 sebagai paper trading harian (forward test).
+4. Sistem baru dibuat **ramping**: cukup jalan sekali sehari, tanpa Neo4j, GNN, LLM, atau
+   WebSocket. Lebih sedikit yang bisa rusak.
+5. Uang asli hanya kalau forward test lolos syarat yang ditulis **sebelum** dimulai.
 
 ---
 
-## Peta fase
+## Apa yang berubah dari v1 (evaluasi ulang rekomendasi saya)
 
-| Fase | Isi | Syarat lulus (gate) | Ukuran kerja |
+| v1 bilang | Setelah riset | Status |
+|---|---|---|
+| Fase 0: perbaiki cara mengukur dulu | Sudah dikerjakan untuk riset (`research/`): eksekusi di open hari berikutnya, biaya asli, data Binance, holdout, uji acak, 8 test | **Selesai untuk riset** |
+| Fase 1: cari edge, maksimal 5 kandidat | Diuji 10 (termasuk SMC). Trend following terbaik di DEV, tapi tidak ada yang lolos ujian holdout | **Selesai: tidak ada yang lolos** |
+| "Time-series momentum harian, kandidat dengan bukti akademik" | Lolos uji acak di DEV (Sharpe 1.54) tapi drawdown 52.6%, dan −14.8% di holdout | Benar soal buktinya, tapi bukan pemenang |
+| Fase 2: turunkan fee dulu | Untuk strategi harian yang jarang trading, biayanya kecil (C4 ±1.9%/tahun). Fee bukan masalah utama lagi | **Prioritas turun** |
+| Fase 3: testnet lalu uang kecil | Diganti dengan **forward test** paper C4 yang syaratnya dikunci dulu | **Diubah** |
+| Fase 4: dashboard 5 tab | Dibandingkan dengan FreqUI, Hummingbot, QuantConnect, FIA. Kurang: login, kill switch, notifikasi, panel risiko, grafik trade | **Diperbaiki jadi v2 (6 tab)** |
+| Fase 5: sederhanakan arsitektur (opsional) | Strategi harian **tidak butuh** Neo4j, GNN, LLM, atau stream WebSocket | **Jadi inti rencana** |
+| "Target minimal 3x biaya bolak-balik" untuk SMC | SMC tetap rugi di semua timeframe (1h, 4h, 1d), bahkan di harian | SMC dihentikan |
+
+---
+
+## Langkah A: Keputusan kamu, pensiunkan SMC sebagai strategi trading
+
+Bukti [TERUKUR], semuanya dengan harga masuk jujur dan fee Tokocrypto:
+
+| SMC | DEV 2018–2024 | Holdout 2025–2026 |
+|---|---|---|
+| 1h | bangkrut 25 Feb 2021 | −46.7% |
+| 4h | bangkrut 14 Mei 2022 | −74.6% |
+| 1d | −67% | −28.0% |
+
+Kodenya tidak dihapus. Tetap di git, dan bisa dipakai untuk riset.
+
+## Langkah B: Bot trend harian yang ramping (mode paper dulu)
+
+| Bagian | Desain |
+|---|---|
+| Jadwal | Sekali sehari, 5 menit setelah candle harian UTC tutup (07:05 WIB) |
+| Sinyal | **Kode yang sama persis** dengan riset (`research/strategies.py`), jadi tidak ada beda antara backtest dan live |
+| Eksekusi paper | Dicatat di harga **open** hari itu (jujur), ke ledger **baru**. Ledger lama tidak disentuh |
+| Eksekusi nyata (nanti) | Order Tokocrypto; order < $5 dilewati atau ditumpuk; rekonsiliasi saldo exchange vs ledger tiap hari |
+| Pengaman (FIA 2024) | Kill switch, batas rugi harian, batas masuk-ulang otomatis, blokir order kalau data basi, batas ukuran order |
+| Notifikasi | Telegram: ringkasan harian, setiap trade, peringatan |
+| Yang **tidak** dipakai | Neo4j, GNN, LLM, WebSocket, monitor SL/TP per detik (stop dicek di harga close harian) |
+
+## Langkah C: Forward test (syarat dikunci sebelum mulai)
+
+- **Durasi:** minimal 6 bulan sejak bot paper berjalan.
+- **Utama:** C4. **Ikut dicatat:** C5, karena sinyalnya sama dan eksposurnya lebih besar. Paper tidak ada biayanya.
+- **Lulus kalau:**
+  - return bersih > 0;
+  - drawdown terburuk < 20%;
+  - hasil paper tidak menyimpang lebih dari 1% per bulan dari backtest periode yang sama
+    (cek bahwa bot menjalankan strategi yang benar).
+- **Juga dilaporkan:** vs buy-and-hold 8 koin, vs BTC.
+- **Kalau gagal:** tidak pakai uang asli, evaluasi ulang. Jangan ubah parameter lalu langsung pakai uang.
+
+## Langkah D: Riset putaran 2 (paralel, dikunci dulu sebelum jalan)
+
+| # | Ide | Kenapa | Catatan |
 |---|---|---|---|
-| 0 | Fondasi: timbangan yang jujur | Mesin baru mereproduksi hasil "rugi di harga pasar" | Sedang |
-| 1 | Teknik trade: cari edge | Untung di holdout, CI di atas nol, mengalahkan entry acak | Besar |
-| 2 | Turunkan biaya: venue dan fee | Fee terverifikasi, ada stop di exchange | Kecil–sedang |
-| 3 | Eksekusi nyata bertahap | ≥ 30 trade nyata cocok dengan simulasi | Sedang + waktu |
-| 4 | Dashboard baru | Semua angka bisa direproduksi dari ledger | Sedang |
-| 5 | Sederhanakan arsitektur | Keputusan kamu | Kecil |
+| D1 | **Trend long/short di futures** | Paper Zarattini menyebut versi long-short lebih kuat; 2025–2026 adalah pasar turun yang dilewatkan strategi long-only | Butuh fee Bittime resmi (belum terverifikasi); data funding Binance sudah tersedia [TERUKUR] |
+| D2 | **Universe lebih luas**: 20 koin paling likuid, termasuk koin yang sudah mati | Mengurangi bias survivorship dan menambah diversifikasi; hasil utama paper memakai 20 koin | Data koin yang sudah dihapus perlu dicek ketersediaannya |
+| D3 | **Imbal hasil untuk kas yang menganggur** | C4 rata-rata 89% di kas | Cek apakah Tokocrypto punya produk USDT yang aman; [DUGAAN] |
 
-Fase 4 dan 5 bisa dikerjakan **paralel** dengan Fase 1. Fase 3 hanya boleh dimulai
-setelah Fase 1 lulus.
+Penting: data 2018–2026 sudah terlihat. Pemenang putaran 2 tetap **wajib** forward test.
 
----
+## Langkah E: Dashboard v2 (dievaluasi ulang dengan referensi luar)
 
-## Fase 0: Fondasi, "timbangan yang jujur"
+### Pembanding yang dipelajari [SUMBER LUAR]
 
-Kenapa paling dulu: semua angka setelahnya bergantung pada ini. Selama ini timbangannya
-salah ±0.5R per trade [TERUKUR].
+| Referensi | Yang mereka punya |
+|---|---|
+| **FreqUI** (dashboard bot open-source Freqtrade) | Grafik candle dengan tanda entry/exit, tombol start/stop bot, ringkasan performa semua bot, grafik saldo termasuk PnL belum terealisasi; via Telegram: `/status`, `/profit`, `/daily`, `/performance` per koin, `/forceexit`, `/stopentry` |
+| **Hummingbot Dashboard** | Kartu ringkasan (PnL bersih, jumlah trade, akurasi, profit factor); menurut DeepWiki (belum saya cek di kode) juga PnL terealisasi vs belum dan statistik alasan keluar (kena TP / kena SL) |
+| **QuantConnect** (laporan statistik) | Total order, rata-rata untung/rugi, CAGR, drawdown, Sharpe, Sortino, win rate, **total fee**, turnover, **lama pemulihan drawdown** |
+| **FIA, *Best Practices for Automated Trading Risk Controls* (Juli 2024)** | Batas ukuran order, batas posisi (dengan peringatan saat mendekati batas), toleransi harga, cancel-on-disconnect, **kill switch**, cek kewajaran data pasar (data basi = blokir order), **batas masuk-ulang otomatis**, rekonsiliasi eksekusi exchange vs catatan internal |
 
-| # | Pekerjaan | Di mana |
+### Evaluasi rencana lama (5 tab)
+
+| Aspek | Rencana lama | Penilaian |
 |---|---|---|
-| 0.1 | **Model harga masuk yang benar.** Default: masuk di harga pasar saat sinyal (plus slippage). Opsi kedua: limit order yang hanya terisi kalau harga benar-benar menembusnya. Stop dan target dihitung dari harga masuk yang **asli**. | `backtrack/paper_trading.py` (`maybe_open`), `strategy/entry_insight.py` |
-| 0.2 | **Biaya realistis jadi default:** fee venue (`VENUE_FEE_PCT` sudah ada), slippage stop 0.119% [TERUKUR], slippage entry diukur. | `config/settings.py` |
-| 0.3 | **Data dari Binance sendiri, disimpan lokal.** Kline 5m/15m/1h/4h/1d, 8 koin, Januari 2022 sampai sekarang, dari `data-api.binance.vision` (sudah dicek bisa [TERUKUR]). Backtest pakai **tanggal tetap**, bukan "730 hari terakhir", supaya hasilnya bisa diulang. | script fetch baru, folder `data/klines/` |
-| 0.4 | **Holdout dikunci:** 6 bulan terakhir (mis. 1 April 2026 sampai sekarang) tidak boleh disentuh selama pengembangan. Program menolak membacanya kecuali dengan flag `--final`. | konfigurasi backtest |
-| 0.5 | **Buku catatan percobaan otomatis:** setiap backtest mencatat config dan hasilnya. Jumlah percobaan dipakai untuk menghitung Deflated Sharpe. | file `research/trials.jsonl` |
-| 0.6 | **Pembanding wajib di setiap laporan:** (a) buy-and-hold 8 koin, (b) **entry acak** dengan stop, target, dan biaya yang sama, diulang ±1.000 kali. Strategi harus lebih baik dari entry acak, bukan cuma lebih baik dari nol. | modul benchmark baru |
-| 0.7 | **Test regresi:** harga masuk tidak boleh lebih bagus dari harga pasar; biaya selalu terpotong. | `tests/` |
+| Metrik jujur (ekspektasi, PF, R, WR + CI, peringatan n kecil) | Ada | **Tepat**, sesuai QuantConnect/Hummingbot |
+| Biaya per trade | Ada | Tepat; tambah **total fee** dan **lama pemulihan drawdown** |
+| Status order di exchange + rekonsiliasi | Ada | Tepat, sesuai FIA 4.1 |
+| **Tombol kontrol** (stop entry, tutup semua) | **Tidak ada** | Kurang. FreqUI dan FIA 1.5 menjadikannya standar |
+| **Login / keamanan** | **Tidak ada** | **Celah nyata [TERUKUR]:** `main.py:649` menjalankan dashboard di `0.0.0.0` tanpa login, jadi saldo, posisi, dan potongan log bisa dibuka siapa pun di jaringan yang sama |
+| **Notifikasi HP** | Hanya disebut di Fase 3 | Kurang. Telegram adalah standar FreqUI dan Hummingbot |
+| **Panel batas risiko** | Tidak ada | Kurang. FIA 1.2: posisi vs batas, dengan peringatan sebelum tembus |
+| **Batas masuk-ulang** | Tidak ada | Kurang. FIA 3.2, dan sudah terbukti perlu: 3 long TSLA masuk ulang dan masing-masing rugi −$526.08 dalam satu jam |
+| **Grafik trade** (candle + tanda entry/exit) | Tidak ada | Kurang. Paling mudah dipahami sekilas |
+| **Live vs backtest** | Hanya selisih harga masuk | Kurang. Perlu satu panel "hasil nyata vs hasil simulasi periode yang sama" |
+| Kalender return harian/bulanan | Tidak ada | Tambahan yang berguna (`/daily` FreqUI) |
+| GNN dan Knowledge Graph di baris teratas | Dipindah ke "Lab" | Tepat |
 
-**Gate 0:** mesin baru mereproduksi hasil eksperimen fill realism (market order rugi),
-semua test lulus, dan pembanding entry acak sudah jalan.
-
----
-
-## Fase 1: Teknik trade, mencari strategi yang benar-benar untung
-
-Semua kandidat ditulis dulu (pre-registered), diuji di data pengembangan, lalu yang
-terbaik dibuka sekali di holdout. **Maksimal 5 kandidat** sebelum kita berhenti dan
-evaluasi ulang.
-
-| # | Kandidat | Kenapa | Label |
-|---|---|---|---|
-| 1.1 | **SMC/FVG versi jujur** di 1h, 4h, dan 1d: masuk di harga pasar, target minimal **3x biaya bolak-balik** | Timeframe besar bergerak lebih jauh dibanding biaya. Trade kita sekarang targetnya cuma ±0.63% padahal biaya 0.76% [TERUKUR] | DUGAAN |
-| 1.2 | **Tren harian + entry SMC:** LONG hanya kalau tren harian naik (mis. harga di atas rata-rata 50 hari), lalu masuk di FVG | Tidak melawan arus besar | DUGAAN |
-| 1.3 | **Time-series momentum harian** (tanpa SMC): beli kalau return 4–12 minggu positif, keluar kalau berbalik, ukuran posisi disesuaikan volatilitas | Satu-satunya kandidat dengan bukti akademik di crypto (Liu & Tsyvinski 2021) | SUMBER LUAR |
-| 1.4 | **Uji ulang filter yang dulu "ditolak"** (bias timeframe besar, EMA50, regime) di atas kandidat 1.1 | Bias lama menghukum filter yang mengurangi jumlah trade | DUGAAN |
-| 1.5 | **Exit dalam R dari harga masuk asli** (1.5R / 2R / 3R) plus batas waktu | Matriks target lama diukur di harga tengah gap | DUGAAN |
-
-Aturan tambahan:
-
-- **Sizing:** tetap risk 0.25% per trade + cap notional 1.0x (sudah ada). Volatility targeting diuji sebagai opsi. [DUGAAN]
-- **Arah:** di spot hanya LONG. SHORT hanya kalau nanti pakai futures **dan** SHORT terbukti sendiri.
-- **Timeframe live** hanya yang lulus uji. 5m/15m tidak boleh live tanpa uji multi-tahun.
-
-**Gate 1** (semua harus terpenuhi):
-
-1. Di holdout: ekspektasi per trade setelah biaya > 0, batas bawah CI 95% (block bootstrap) > 0.
-2. Lebih baik dari 95% hasil entry acak.
-3. Untung di ≥ 4 dari 6 periode data pengembangan.
-4. Drawdown terburuk < 20%.
-5. Deflated Sharpe dilaporkan dengan jumlah percobaan yang jujur.
-
-Kalau tidak ada kandidat yang lolos: **berhenti, jangan pakai uang asli.**
-
----
-
-## Fase 2: Turunkan biaya (tuas profit terbesar setelah ada edge)
-
-| # | Pekerjaan | Catatan |
-|---|---|---|
-| 2.1 | Cek **jadwal fee resmi Bittime futures** | Satu sumber pihak ketiga menyebut taker ±0.054% / maker ±0.024%, tapi datanya tidak konsisten. **Belum terverifikasi.** Kalau benar, biaya ±7x lebih murah dari Tokocrypto spot. [SUMBER LUAR] |
-| 2.2 | Jangan berharap fee murah saja menyelamatkan strategi lama | Di fee 0.1%, market order tetap rugi −$54,728, 0/6 periode [TERUKUR] |
-| 2.3 | Kalau pakai futures: leverage 1–2x saja, hitung funding dan likuidasi di backtest dulu | DUGAAN |
-| 2.4 | Lebih sedikit trade, gerakan lebih besar per trade | Biaya dibayar per trade |
-
-**Gate 2:** venue punya stop di exchange, fee terverifikasi, API teruji.
-
----
-
-## Fase 3: Eksekusi nyata, bertahap
-
-| # | Langkah | Syarat |
-|---|---|---|
-| 3.1 | Jalankan di **testnet** dengan ledger yang sudah diperbaiki; bandingkan harga isi order vs ledger | Setelah Fase 0 |
-| 3.2 | Lengkapi pengaman: batas rugi harian (sudah ada, 5%), tombol stop darurat, batas jumlah posisi, **notifikasi** (mis. Telegram) kalau proteksi gagal | — |
-| 3.3 | **Uang asli kecil** (jumlah yang siap hilang), 4 saklar dinyalakan sengaja | Setelah Gate 1 dan Gate 2 |
-| 3.4 | Jalankan ≥ 30 trade, bandingkan dengan backtest periode yang sama | — |
-| 3.5 | Naikkan modal **bertahap** hanya kalau live cocok dengan backtest | — |
-
-**Gate 3:** ≥ 30 trade nyata, hasil di dalam rentang backtest, tidak ada insiden posisi
-tanpa proteksi.
-
----
-
-## Fase 4: Dashboard baru
-
-**Kondisi sekarang [TERUKUR, dari kode]:** satu file HTML 827 baris; dashboard crypto dan
-saham terpisah di dua port (8080/8081); dua baris teratas diisi regime, sinyal GNN, dan
-Knowledge Graph (Neo4j), padahal regime dan graph tidak dipakai untuk keputusan Path 1 dan
-GNN hanya bisa memveto di ±1.1% panggilan (sisanya terblokir threshold); PnL yang
-tampil adalah PnL "dicatat" (dengan diskon); kata fee, slippage, benchmark, confidence,
-dan OCO tidak muncul sama sekali di halamannya.
-
-**Desain baru, 5 tab:**
+### Desain v2: 6 tab, layar pertama dibuat sesederhana mungkin
 
 | Tab | Isi |
 |---|---|
-| **Ringkasan** | Kurva ekuitas dan drawdown; vs buy-and-hold periode yang sama; PnL hari ini, minggu ini, bulan ini; status sistem satu baris (hijau/kuning/merah) |
-| **Performa jujur** | Ekspektasi per trade, profit factor, rata-rata R, win rate **dengan CI 95%**, jumlah trade plus peringatan kalau n < 30; dipecah per arah, timeframe, dan koin; biaya per trade (fee + slippage + selisih harga masuk) |
-| **Posisi & order** | Posisi terbuka, jarak ke stop/target dalam R, status OCO di exchange (terpasang / terisi / hilang), hasil rekonsiliasi |
-| **Sinyal & penolakan** | Sinyal terbaru dan alasan ditolak (datanya sudah ada di `rejection_history`) |
-| **Kesehatan & riset** | Kesegaran data per koin, koneksi WebSocket, proses, watchdog; buku catatan percobaan dan Deflated Sharpe |
+| **1. Status** (layar pertama) | Satu lampu besar: hijau = jalan normal, kuning = ada peringatan, merah = berhenti. Di bawahnya hanya 4 angka: ekuitas, PnL hari ini, drawdown dari puncak, jumlah posisi terbuka. Tombol **Stop entry** dan **Tutup semua & stop** (dengan konfirmasi) |
+| **2. Performa** | Kurva ekuitas + drawdown vs buy-and-hold; ekspektasi per trade, profit factor, win rate dengan CI 95%, Sharpe, total fee, lama pemulihan drawdown; peringatan "n < 30, belum bermakna"; kalender return; per koin dan per alasan keluar |
+| **3. Posisi & order** | Posisi terbuka, jarak ke stop dalam %, status order di exchange (terpasang/terisi/hilang), hasil rekonsiliasi exchange vs ledger |
+| **4. Risiko** | Eksposur vs batas (cap notional 1.0x), batas rugi harian (5%) dengan peringatan di 80%, penghitung masuk-ulang per setup, status data (umur candle terakhir per koin; basi = entry diblokir) |
+| **5. Sinyal & grafik** | Grafik candle per koin dengan tanda entry/exit; untuk strategi trend: status sinyal tiap koin (misalnya 6/9 sub-model aktif) dan jarak ke trailing stop; log penolakan |
+| **6. Riset** | Live vs backtest periode yang sama, buku catatan percobaan, Deflated Sharpe; GNN dan Knowledge Graph dipindah ke sini |
 
-**Teknis [DUGAAN, bisa diganti]:**
+**Teknis:**
 
-- Tetap FastAPI. Endpoint baru: `/api/summary`, `/api/performance`, `/api/positions`, `/api/health`, `/api/research`.
-- **Satu dashboard** untuk crypto dan saham.
-- Grafik pakai library chart (mis. TradingView Lightweight Charts), mode gelap, bisa dibuka di HP.
-- GNN dan Neo4j dipindah ke halaman "Lab".
+- Tetap FastAPI.
+- **Wajib login** (token) atau hanya `127.0.0.1` sebelum tombol kontrol ada.
+- Endpoint: `/api/status`, `/api/performance`, `/api/positions`, `/api/risk`, `/api/signals`, `/api/research`, plus `POST /api/control` (terlindungi).
+- Grafik pakai TradingView Lightweight Charts (open source, ringan).
+- Bot Telegram kecil untuk `/status`, `/daily`, `/stop`, plus notifikasi otomatis kalau proteksi gagal, data basi, atau batas rugi tersentuh.
 
-**Syarat selesai:** setiap angka di dashboard bisa direproduksi dari ledger dengan satu
-script, dan tidak ada angka "dicatat" yang tampil tanpa label.
+**Syarat selesai:**
+
+- Setiap angka bisa direproduksi dari ledger dengan satu script.
+- Tombol kontrol tidak bisa dipakai tanpa login.
+- Kill switch diuji sungguhan di testnet.
+
+## Langkah F: Uang asli (paling akhir)
+
+- **Syarat:** forward test lolos, kill switch diuji di testnet, dan login dashboard aktif.
+- **Modal:** C4 ±$900–1.200 supaya setiap perubahan posisi ≥ $5 [DUGAAN, dari order minimum
+  $5 yang TERUKUR]. C5 ±$360. Bisa lebih kecil, tapi hasil nyata akan lebih menyimpang dari simulasi.
+- **Saklar:** 4 saklar sengaja, sama seperti sekarang. Ditambah batas rugi harian dan
+  notifikasi setiap order.
 
 ---
 
-## Fase 5: Sederhanakan arsitektur (keputusan kamu)
+## Harapan yang realistis [TERUKUR dari backtest, bukan janji]
 
-| Komponen | Fakta | Usul |
-|---|---|---|
-| Neo4j | Wajib hidup untuk start (langkah 1 di `main.py`), watchdog tidak bisa menyalakannya; ke Path 1 hanya lewat GNN [TERUKUR] | Jadikan **opsional**: sistem tetap jalan tanpa Neo4j |
-| GNN | 98.9% terblokir; tanpa threshold pun tidak menambah edge [TERUKUR] | Keluarkan dari loop trading, kode disimpan |
-| LLM Path 2 | 0 trade dari 3,050+ keputusan [TERUKUR] | Keluarkan dari loop trading, kode disimpan |
-| Saham | Belum ada broker yang bisa dipakai | Bekukan sampai ada jalur eksekusi |
+| | Tahun bagus | Tahun buruk | Win rate | Drawdown terburuk |
+|---|---|---|---|---|
+| C4 | +15% s/d +44% | −2% s/d −7% | 10–15% | 13.7% |
+| C5 | +42% s/d +392% | −7% s/d −23% | 10–14% | 38.8% |
+| Buy & hold 8 koin | +39% s/d +919% | −17% s/d −77% | — | 82.7% |
 
-Hasil yang diharapkan [DUGAAN]: start lebih cepat, lebih sedikit titik gagal, biaya
-OpenAI nol. Sesuai juga dengan keputusanmu 22 Agustus 2026: fokus ke sistem inti, tanpa ML.
+- Sebagian besar trade **kecil dan rugi**. Untung datang dari sedikit tren besar.
+  Bot harus dibiarkan jalan tanpa diganggu.
+- Ada periode panjang **tanpa untung**, contohnya seluruh 2025–2026.
+- Angka tahun bagus terlalu tinggi karena bias survivorship. Lihat bagian 8 di laporan riset.
 
 ---
 
 ## Yang perlu kamu putuskan
 
-1. **Mulai Fase 0?** Rekomendasi: ya, ini prasyarat semuanya.
-2. **Fase 5** (Neo4j opsional, GNN dan LLM keluar dari loop, kode disimpan)? Rekomendasi: ya.
-3. **Paper trading tetap mati sampai Fase 0 selesai?** Rekomendasi: ya. Ledger lama masih
-   mencatat dengan diskon, jadi data barunya tetap bias.
-4. **Fee Bittime:** kalau kamu punya akun, cek halaman fee resminya. Itu informasi
-   termurah yang bisa mengubah Fase 2.
+1. **Pensiunkan SMC sebagai strategi trading?** Saran: ya.
+2. **Bangun bot trend harian (Langkah B) dan mulai forward test (Langkah C)?** Saran: ya. Ini jalan tercepat ke bukti yang jujur.
+3. **Riset putaran 2 (Langkah D)?** Saran: ya, mulai dari D1, setelah fee Bittime resmi kamu cek.
+4. **Dashboard v2 (Langkah E):** dikerjakan bersama bot? Saran: ya, versi sederhana dulu (tab Status + Performa + Posisi).
 
-## Yang TIDAK akan dilakukan
+## Yang tidak akan dilakukan
 
-- Uang asli sebelum Gate 1 dan Gate 3 lulus.
-- Menambah ML (sesuai keputusanmu).
-- Mengejar win rate tinggi dengan mengorbankan ekspektasi.
-- Mengubah ledger paper tanpa perintah langsung darimu.
+- Uang asli sebelum forward test lolos.
+- Menambah ML.
+- Memilih strategi setelah melihat hasil ujian (misalnya RSI2 karena positif di holdout).
+- Menyentuh ledger paper lama tanpa perintah langsung darimu.
 
 ---
 
@@ -193,15 +182,11 @@ OpenAI nol. Sesuai juga dengan keputusanmu 22 Agustus 2026: fokus ke sistem inti
 
 | Istilah | Arti |
 |---|---|
-| **R** | Jarak dari harga masuk ke stop. "+2R" artinya untung 2x dari risiko |
-| **Ekspektasi** | Rata-rata hasil per trade setelah biaya. Harus positif |
-| **Biaya bolak-balik** | Fee masuk + fee keluar. Tokocrypto: 0.76% |
-| **Holdout** | Data yang disimpan dan baru dibuka di akhir, seperti soal ujian |
-| **Overfitting** | Strategi terlihat bagus karena terlalu sering dicoba di data yang sama |
-| **Entry acak** | Pembanding: masuk di waktu acak dengan aturan keluar yang sama. Kalau strategi tidak mengalahkannya, sinyalnya tidak berguna |
-| **Drawdown** | Penurunan dari puncak modal. 100% berarti modal habis |
-
-## Sumber luar
-
-- [Liu & Tsyvinski (2021), Risks and Returns of Cryptocurrency, RFS 34(6)](https://ideas.repec.org/a/oup/rfinst/v34y2021i6p2689-2727..html): time-series momentum yang kuat di crypto
-- [TradersUnion, fee Bittime (pihak ketiga, tidak konsisten, belum terverifikasi)](https://tradersunion.com/brokers/crypto/view/bittime/fees/)
+| **Trend following** | Beli saat harga menembus ke atas, keluar saat tren patah. Tidak menebak puncak atau dasar |
+| **Donchian** | Batas tertinggi dan terendah harga dalam N hari terakhir |
+| **Ensemble** | Gabungan beberapa versi (9 lookback) supaya tidak bergantung pada satu angka |
+| **Target volatilitas** | Koin yang lebih liar dibeli lebih sedikit |
+| **Forward test** | Menjalankan strategi ke depan tanpa uang asli, untuk bukti yang belum pernah dilihat |
+| **Holdout** | Data ujian yang disegel sampai pilihan dibuat |
+| **Survivorship bias** | Hasil terlalu bagus karena hanya menguji koin yang masih hidup sekarang |
+| **Kill switch** | Tombol darurat: hentikan semua order baru dan tutup posisi |

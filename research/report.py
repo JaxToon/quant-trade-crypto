@@ -23,21 +23,27 @@ def _num(v, d=2):
     return f"{v:.{d}f}"
 
 
+def _plain(v, d=0):
+    return "—" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v*100:.{d}f}%"
+
+
 def table(results: dict, with_null: bool) -> str:
     head = ("| Strategi | CAGR | Sharpe | CI 95% Sharpe | MaxDD | Calmar | Win rate | Trade/thn | "
-            "Ekspektasi/trade | Eksposur |" + (" Uji acak (p95) |" if with_null else ""))
+            "Ekspektasi/trade | Eksposur rata-rata |" + (" Uji acak p95 |" if with_null else ""))
     sep = "|---" * (10 + (1 if with_null else 0)) + "|"
     rows = [head, sep]
     for name, s in results.items():
         if not s:
             rows.append(f"| {name} | (tidak ada data) |")
             continue
+        bench = name.startswith("BH-")
         ci = s.get("sharpe_ci")
         ci_s = f"[{ci[0]:.2f}, {ci[1]:.2f}]" if ci else "—"
-        row = (f"| {name} | {_pct(s['cagr'])} | {_num(s['sharpe'])} | {ci_s} | {_pct(-s['maxdd'])} | "
-               f"{_num(s['calmar'])} | {_pct(s.get('win_rate'), 0) if 'win_rate' in s else '—'} | "
-               f"{_num(s.get('trades_per_year'), 1)} | {_pct(s.get('expectancy_pct'), 2) if 'expectancy_pct' in s else '—'} | "
-               f"{_pct(s.get('avg_exposure'), 0) if 'avg_exposure' in s else '—'} |")
+        wr = "—" if bench else _plain(s.get("win_rate"))
+        tpy = "—" if bench else _num(s.get("trades_per_year"), 1)
+        exp = "—" if bench else _pct(s.get("expectancy_pct"), 2)
+        row = (f"| {name} | {_pct(s['cagr'])} | {_num(s['sharpe'])} | {ci_s} | {_plain(s['maxdd'], 1)} | "
+               f"{_num(s['calmar'])} | {wr} | {tpy} | {exp} | {_plain(s.get('avg_exposure'))} |")
         if with_null:
             row += f" {_num(s.get('null_p95'))} |" if "null_p95" in s else " n/a |"
         rows.append(row)
