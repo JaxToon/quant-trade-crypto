@@ -1,0 +1,203 @@
+"""The fund must trade exactly the strategy that was researched, and its guards must hold."""
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from fund import broker as fbroker
+from fund import config, core, ledger, market
+from fund import run_daily
+from research import engine
+from research.data import CACHE_DIR, SYMBOLS
+
+HAVE_DATA = all(os.path.exists(os.path.join(CACHE_DIR, f"{s}_1d.parquet")) for s in SYMBOLS)
+
+
+def _panel():
+    frames = {s: pd.read_parquet(os.path.join(CACHE_DIR, f"{s}_1d.parquet")) for s in SYMBOLS}
+    return {f: pd.DataFrame({s: d[f] for s, d in frames.items()}).sort_index() for f in ("open", "close")}
+
+
+def _simulate_fund(p, min_order=0.0):
+    """Drive the fund's own decision code day by day over history."""
+    close, open_ = p["close"], p["open"]
+    sig, tgt = core.targets(close)
+    syms = list(close.columns)
+    O = open_.fillna(1.0)  # pre-listing coins hold nothing; any price works
+    qty, cash, last = {}, 1.0, np.zeros(len(syms))
+    eq = []
+    for i in range(1, len(close) - 1):
+        d_prev, d = close.index[i - 1], close.index[i]
+        prices = O.loc[d].to_dict()
+        _, qty, cash, last, _, _ = core.plan_orders(
+            syms, qty, cash, prices, tgt.loc[d_prev].to_numpy(), sig.loc[d_prev].to_numpy(),
+            last, d_prev.dayofweek == 0, min_order=min_order)
+        nxt = O.iloc[i + 1]
+        eq.append((close.index[i], cash + sum(qty[k] * nxt[k] for k in syms)))
+    return pd.Series(dict(eq))
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="research kline cache not present")
+def test_fund_reproduces_research_backtest():
+    p = _panel()
+    sig, tgt = core.targets(p["close"])
+    res = engine.run(p["open"], tgt, sig, config.COST, engine.mondays(p["close"].index), config.BAND,
+                     track_trades=False)
+    research_eq = (1 + res.returns).cumprod()
+    fund_eq = _simulate_fund(p)
+    research_eq = research_eq.reindex(fund_eq.index)
+    years = (fund_eq.index[-1] - fund_eq.index[0]).days / 365.25
+    cagr = lambda s: s.iloc[-1] ** (1 / years) - 1
+    # Fund pays fees from cash; the engine spreads them over holdings. A few bp/yr at most.
+    assert abs(cagr(fund_eq) - cagr(research_eq)) < 0.001
+    assert (fund_eq / research_eq - 1).abs().max() < 0.005
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="research kline cache not present")
+def test_min_order_costs_little():
+    """A $1,000 book that skips sub-$5 orders still tracks the strategy."""
+    p = _panel()
+    p = {k: v[v.index >= "2023-01-01"] for k, v in p.items()}
+    full = _simulate_fund(p)
+    small = _simulate_fund({k: v for k, v in p.items()}, min_order=5.0 / 1000.0)
+    assert abs(small.iloc[-1] / full.iloc[-1] - 1) < 0.02
+
+
+def test_plan_orders_never_leaves_negative_cash():
+    syms = ["A", "B"]
+    orders, q, cash, *_ = core.plan_orders(
+        syms, {"A": 1.0}, 0.0, {"A": 100.0, "B": 100.0},
+        t=np.array([0.5, 0.5]), s=np.array([1.0, 1.0]), last_sig=np.array([1.0, 0.0]),
+        rebalance=True)
+    assert cash >= -1e-9
+    assert sum(o.notional for o in orders if o.side == "BUY") <= 100.0
+
+
+# ---------------------------------------------------------------- run_daily guards
+
+@pytest.fixture
+def fake_market(monkeypatch, tmp_path):
+    idx = pd.date_range("2024-01-01", periods=800, freq="D", tz="UTC")
+    rng = np.random.default_rng(0)
+    close = pd.DataFrame({s: 100 * np.exp(np.cumsum(rng.normal(0.002, 0.03, len(idx))))
+                          for s in config.UNIVERSE}, index=idx)
+    today = idx[-1] + pd.Timedelta(days=1)
+    monkeypatch.setattr(market, "history", lambda syms, t: {"open": close, "close": close})
+    monkeypatch.setattr(market, "todays_open", lambda syms, t: close.iloc[-1].to_dict())
+    monkeypatch.setattr(config, "PAPER_LEDGER", str(tmp_path / "paper.json"))
+    monkeypatch.setattr(config, "KILL_FILE", str(tmp_path / "KILL"))
+    monkeypatch.setattr(run_daily.notify, "send", lambda text: True)
+    return today, tmp_path
+
+
+def test_paper_run_is_idempotent(fake_market):
+    today, tmp = fake_market
+    first = run_daily.run("paper", today=today)
+    assert first is not None
+    assert run_daily.run("paper", today=today) is None
+    book = ledger.load(config.PAPER_LEDGER, "paper", 1000)
+    assert len(book.runs) == 1
+    assert book.cash >= 0
+
+
+def test_kill_switch_blocks_buys(fake_market):
+    today, tmp = fake_market
+    (tmp / "KILL").write_text("stop")
+    rec = run_daily.run("paper", today=today)
+    assert all(o["side"] == "SELL" for o in rec["orders"])
+    assert ledger.load(config.PAPER_LEDGER, "paper", 1000).halted
+
+
+def test_stale_data_aborts(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "PAPER_LEDGER", str(tmp_path / "paper.json"))
+    monkeypatch.setattr(run_daily.notify, "send", lambda text: True)
+
+    def stale(syms, t):
+        raise market.StaleData("old")
+    monkeypatch.setattr(market, "history", stale)
+    with pytest.raises(market.StaleData):
+        run_daily.run("paper", today=pd.Timestamp("2026-11-06", tz="UTC"))
+    assert not os.path.exists(config.PAPER_LEDGER)
+
+
+# ---------------------------------------------------------------- exchange broker
+
+class FakeClient:
+    API_URL = "https://www.tokocrypto.site/api"
+
+    def __init__(self):
+        self.orders = []
+        self.usdt = 1000.0
+
+    def get_account(self):
+        return {"balances": [{"asset": "USDT", "free": str(self.usdt), "locked": "0"}]}
+
+    def get_symbol_info(self, symbol):
+        return {"filters": [{"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                            {"filterType": "NOTIONAL", "minNotional": "5"}]}
+
+    def create_order(self, **kw):
+        self.orders.append(kw)
+        return {"executedQty": kw["quantity"], "cummulativeQuoteQty": str(float(kw["quantity"]) * 100),
+                "fills": [], "orderId": len(self.orders), "status": "FILLED"}
+
+
+def test_broker_refuses_real_money_without_confirmation():
+    with pytest.raises(fbroker.RefuseToArm):
+        fbroker.ExchangeBroker(client=FakeClient(), venue="tokocrypto", enabled=True,
+                               confirm_real_money=False)
+    with pytest.raises(fbroker.RefuseToArm):
+        fbroker.ExchangeBroker(client=FakeClient(), venue="tokocrypto", enabled=False,
+                               confirm_real_money=True)
+
+
+def test_broker_sells_first_and_skips_dust():
+    c = FakeClient()
+    b = fbroker.ExchangeBroker(client=c, venue="tokocrypto", enabled=True, confirm_real_money=True)
+    fills = b.execute([core.Order("BTCUSDT", "BUY", 1.0, 100.0),
+                       core.Order("ETHUSDT", "SELL", 0.5, 100.0),
+                       core.Order("SOLUSDT", "BUY", 0.01, 100.0)],  # $1: below minimum
+                      cash_available=1000.0)
+    assert [o["side"] for o in c.orders] == ["SELL", "BUY"]
+    assert all(o["symbol"] != "SOLUSDT" for o in c.orders)
+    assert c.orders[0]["quantity"] == "0.500"
+    assert len(fills) == 2
+
+
+def test_broker_never_spends_money_outside_the_fund():
+    """The account holds $1,000 USDT, but the fund only owns $20 of it."""
+    c = FakeClient()
+    b = fbroker.ExchangeBroker(client=c, venue="tokocrypto", enabled=True, confirm_real_money=True)
+    b.execute([core.Order("BTCUSDT", "BUY", 5.0, 100.0)], cash_available=20.0)
+    assert float(c.orders[0]["quantity"]) * 100 <= 20.0
+
+
+def test_live_refuses_without_explicit_capital(fake_market, monkeypatch):
+    today, tmp = fake_market
+    monkeypatch.setattr(config, "LIVE_LEDGER", str(tmp / "live.json"))
+    monkeypatch.setattr(config, "LIVE_CAPITAL", 0.0)
+    c = FakeClient()
+    c.get_symbol_ticker = lambda symbol: {"price": "100"}
+    b = fbroker.ExchangeBroker(client=c, venue="tokocrypto", enabled=True, confirm_real_money=True)
+    with pytest.raises(RuntimeError, match="FUND_LIVE_CAPITAL"):
+        run_daily.run("live", broker=b, today=today)
+    assert c.orders == []
+
+
+def test_live_halts_when_exchange_holds_less_than_book(fake_market, monkeypatch):
+    today, tmp = fake_market
+    path = tmp / "live.json"
+    monkeypatch.setattr(config, "LIVE_LEDGER", str(path))
+    book = ledger.Book(mode="live", start_capital=1000, cash=500, qty={"BTCUSDT": 5.0},
+                       peak_equity=1000, runs=[{"date": "2026-01-01"}])
+    ledger.save(book, str(path))
+    c = FakeClient()  # holds no BTC at all
+    c.get_symbol_ticker = lambda symbol: {"price": "100"}
+    b = fbroker.ExchangeBroker(client=c, venue="tokocrypto", enabled=True, confirm_real_money=True)
+    with pytest.raises(RuntimeError, match="less than the book"):
+        run_daily.run("live", broker=b, today=today)
+    assert c.orders == []
+    assert ledger.load(str(path), "live", 1000).halted

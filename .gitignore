@@ -27,3 +27,8 @@ data/klines/
 .playwright-cli/
 graphify-out/
 portfolio_screenshots/
+
+# Fund runtime state (changes daily; the live ledger mirrors a real account)
+data/klines_live/
+data/fund_ledger_*.json
+data/FUND_KILL
