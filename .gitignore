@@ -32,3 +32,6 @@ portfolio_screenshots/
 data/klines_live/
 data/fund_ledger_*.json
 data/FUND_KILL
+data/klines_universe/
+data/universe_fetch.log
+data/fund_loop.log

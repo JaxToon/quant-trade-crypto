@@ -1,0 +1,169 @@
+{
+ "results": {
+  "U8": {
+   "dev": {
+    "cagr": 0.18487168983320612,
+    "sharpe": 1.6426459952141466,
+    "maxdd": 0.1373587850754716,
+    "total_return": 1.9517773264212108,
+    "avg_exposure": 0.11227974766197939
+   },
+   "holdout": {
+    "cagr": -0.02245578128325154,
+    "sharpe": -0.2836386331901776,
+    "maxdd": 0.10961700017187348,
+    "total_return": -0.03945928964031575,
+    "avg_exposure": 0.10427256068393378
+   }
+  },
+  "T10": {
+   "dev": {
+    "cagr": 0.10355792420045451,
+    "sharpe": 1.1952095572850425,
+    "maxdd": 0.1505596979408257,
+    "total_return": 0.8752886558432571,
+    "avg_exposure": 0.09131324289916308
+   },
+   "holdout": {
+    "cagr": -0.003661851035398178,
+    "sharpe": -0.02001633600764419,
+    "maxdd": 0.08825638348953191,
+    "total_return": -0.006481822589921693,
+    "avg_exposure": 0.11106953485566814
+   }
+  },
+  "T20": {
+   "dev": {
+    "cagr": 0.07231804337908021,
+    "sharpe": 0.9978029431534029,
+    "maxdd": 0.13845437255179405,
+    "total_return": 0.5613115735254344,
+    "avg_exposure": 0.07291045288311274
+   },
+   "holdout": {
+    "cagr": -0.014436185286521908,
+    "sharpe": -0.2267704849628327,
+    "maxdd": 0.0914307147444875,
+    "total_return": -0.025446758630540023,
+    "avg_exposure": 0.08078869449725357
+   }
+  },
+  "WF4": {
+   "dev": {
+    "cagr": 0.16523459074671631,
+    "sharpe": 1.480451920599866,
+    "maxdd": 0.13926901558317772,
+    "total_return": 1.6532115371998453,
+    "avg_exposure": 0.10693380556215702
+   },
+   "holdout": {
+    "cagr": -0.012352953093208052,
+    "sharpe": -0.09504015263759985,
+    "maxdd": 0.1274240803339659,
+    "total_return": -0.021792289196889247,
+    "avg_exposure": 0.13753915395148245
+   }
+  },
+  "WF8": {
+   "dev": {
+    "cagr": 0.07344921802523308,
+    "sharpe": 0.8943080026674826,
+    "maxdd": 0.15627886701466642,
+    "total_return": 0.5718507084283813,
+    "avg_exposure": 0.07900045516213473
+   },
+   "holdout": {
+    "cagr": -0.00784332598686921,
+    "sharpe": -0.09062710519645066,
+    "maxdd": 0.11126900598078904,
+    "total_return": -0.013860951195127424,
+    "avg_exposure": 0.1022163140155642
+   }
+  }
+ },
+ "verdict": {
+  "T10": {
+   "higher_sharpe_both": false,
+   "maxdd_within_5pp": true,
+   "passes": false
+  },
+  "T20": {
+   "higher_sharpe_both": false,
+   "maxdd_within_5pp": true,
+   "passes": false
+  },
+  "WF4": {
+   "higher_sharpe_both": false,
+   "maxdd_within_5pp": true,
+   "passes": false
+  },
+  "WF8": {
+   "higher_sharpe_both": false,
+   "maxdd_within_5pp": true,
+   "passes": false
+  }
+ },
+ "chosen": "U8",
+ "current_members": {
+  "U8": [
+   "ADAUSDT",
+   "AVAXUSDT",
+   "BNBUSDT",
+   "BTCUSDT",
+   "DOTUSDT",
+   "ETHUSDT",
+   "SOLUSDT",
+   "XRPUSDT"
+  ],
+  "T10": [
+   "BNBUSDT",
+   "BTCUSDT",
+   "DOGEUSDT",
+   "ETHUSDT",
+   "NEARUSDT",
+   "SOLUSDT",
+   "SUIUSDT",
+   "UNIUSDT",
+   "XRPUSDT",
+   "ZECUSDT"
+  ],
+  "T20": [
+   "ADAUSDT",
+   "AVAXUSDT",
+   "BNBUSDT",
+   "BTCUSDT",
+   "DOGEUSDT",
+   "ENAUSDT",
+   "ETHUSDT",
+   "LINKUSDT",
+   "NEARUSDT",
+   "PEPEUSDT",
+   "PUMPUSDT",
+   "SOLUSDT",
+   "SUIUSDT",
+   "TAOUSDT",
+   "TRUMPUSDT",
+   "TRXUSDT",
+   "UNIUSDT",
+   "WLDUSDT",
+   "XRPUSDT",
+   "ZECUSDT"
+  ],
+  "WF4": [
+   "BNBUSDT",
+   "ETHUSDT",
+   "SOLUSDT",
+   "XRPUSDT"
+  ],
+  "WF8": [
+   "BNBUSDT",
+   "DASHUSDT",
+   "ENAUSDT",
+   "ETHUSDT",
+   "LINKUSDT",
+   "TRXUSDT",
+   "XRPUSDT",
+   "ZECUSDT"
+  ]
+ }
+}
