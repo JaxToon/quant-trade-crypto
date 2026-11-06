@@ -45,6 +45,35 @@ def decide(t: np.ndarray, s: np.ndarray, h: np.ndarray, last_sig: np.ndarray,
     return new, trade, last_sig
 
 
+def submodel_levels(close: pd.Series) -> list[dict]:
+    """State of each Donchian sub-model on the last bar: on/off, its stop if on, its
+    breakout level for the next bar if off. Same loop as strategies.donchian_ensemble."""
+    c = close.to_numpy(dtype=float)
+    out = []
+    for L in strategies.LOOKBACKS:
+        hi = close.shift(1).rolling(L).max().to_numpy()
+        lo = close.shift(1).rolling(L).min().to_numpy()
+        on, stop = False, -np.inf
+        for t in range(len(c)):
+            if np.isnan(c[t]) or np.isnan(hi[t]) or np.isnan(lo[t]):
+                on, stop = False, -np.inf
+                continue
+            mid = (hi[t] + lo[t]) / 2
+            if not on:
+                if c[t] > hi[t]:
+                    on, stop = True, mid
+            else:
+                stop = max(stop, mid)
+                if c[t] < stop:
+                    on, stop = False, -np.inf
+        # Levels that apply to the NEXT close: the window then includes today's close.
+        win = close.iloc[-L:]
+        nxt_hi, nxt_lo = float(win.max()), float(win.min())
+        next_stop = max(stop, (nxt_hi + nxt_lo) / 2) if on else None
+        out.append({"lookback": L, "on": on, "stop": next_stop, "breakout": None if on else nxt_hi})
+    return out
+
+
 @dataclass
 class Order:
     symbol: str

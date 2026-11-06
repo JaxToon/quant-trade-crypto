@@ -79,6 +79,16 @@ def test_risk_multiple_is_a_pure_scaling_of_research_c4():
     assert t2.sum(axis=1).max() <= 1 + 1e-9
 
 
+@pytest.mark.skipif(not HAVE_DATA, reason="research kline cache not present")
+def test_submodel_levels_agree_with_the_strategy_signal():
+    from research import strategies
+    c = _panel()["close"]["BTCUSDT"].dropna()
+    for end in (900, 1500, 2200, len(c)):
+        part = c.iloc[:end]
+        on = sum(x["on"] for x in core.submodel_levels(part))
+        assert on == round(strategies.donchian_ensemble(part).iloc[-1] * 9)
+
+
 def test_plan_orders_never_leaves_negative_cash():
     syms = ["A", "B"]
     orders, q, cash, *_ = core.plan_orders(

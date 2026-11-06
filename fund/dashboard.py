@@ -149,6 +149,53 @@ def status(mode: str = "paper"):
     return _status(mode)
 
 
+_preview_cache: dict = {"t": 0.0, "data": None}
+
+
+@app.get("/api/preview")
+def preview(mode: str = "paper"):
+    """What the next run would do if today closed at the current live price.
+    Display only: the bot still decides once a day on the real daily close."""
+    import time
+    if time.time() - _preview_cache["t"] < 60 and _preview_cache["data"] and _preview_cache["data"].get("mode") == mode:
+        return _preview_cache["data"]
+    path = _ledger_path(mode)
+    live = _live_prices()
+    close = _closes()
+    if not os.path.exists(path) or close.empty or not live:
+        return {"mode": mode, "ok": False}
+    syms = [s for s in config.UNIVERSE if s in close.columns and s in live]
+    today = today_utc()
+    close = close[syms].copy()
+    close.loc[today] = pd.Series(live)[syms]
+    sig, tgt = core.targets(close)
+    b = ledger.load(path, mode, config.PAPER_START_CAPITAL)
+    t = tgt.loc[today].to_numpy(dtype=float)
+    s = sig.loc[today].to_numpy(dtype=float)
+    q = np.array([b.qty.get(k, 0.0) for k in syms])
+    px = np.array([live[k] for k in syms])
+    equity = b.cash + float((q * px).sum())
+    if b.halted or os.path.exists(config.KILL_FILE):
+        t = np.minimum(t, q * px / equity if equity else 0.0)
+    last = np.array([b.last_sig.get(k, 0.0) for k in syms])
+    orders, *_ = core.plan_orders(syms, dict(zip(syms, q)), b.cash, live, t, s, last,
+                                  today.dayofweek == 0, min_order=config.MIN_ORDER_USDT)
+    coins = []
+    for k in syms:
+        lv = core.submodel_levels(close[k].dropna())
+        on = sum(x["on"] for x in lv)
+        ups = [x["breakout"] for x in lv if not x["on"] and x["breakout"]]
+        downs = [x["stop"] for x in lv if x["on"] and x["stop"]]
+        coins.append({"symbol": k, "price": live[k], "active": on,
+                      "buy_above": min(ups) if ups else None, "sell_below": max(downs) if downs else None,
+                      "target": float(t[syms.index(k)])})
+    data = {"mode": mode, "ok": True, "as_of": time.strftime("%H:%M:%S"), "equity": equity,
+            "orders": [{"symbol": o.symbol, "side": o.side, "notional": o.notional} for o in orders],
+            "coins": coins}
+    _preview_cache.update(t=time.time(), data=data)
+    return data
+
+
 @app.get("/api/market")
 def market_moves(days: int = 30):
     """% change of each coin over the last `days` complete daily bars."""
@@ -244,6 +291,9 @@ select{background:var(--card);color:var(--fg);border:1px solid var(--line);borde
   <div class="legend" id="mktleg"></div></div>
 </div>
 
+<div class="card"><div class="k">Pratinjau live <span id="pvasof" class="mut"></span></div>
+<p class="note" style="margin:0 0 8px">Kalau hari ini ditutup di harga sekarang, inilah yang akan dilakukan bot besok pagi (07:10 WIB). Bot hanya memutuskan sekali sehari dari harga penutupan, jadi daftar ini bisa berubah sampai 07:00 WIB.</p>
+<div id="pvorders" style="margin-bottom:10px"></div><div class="scroll"><table id="pvcoins"></table></div></div>
 <div class="card"><div class="k">Sinyal per koin <span id="sigasof" class="mut"></span></div>
 <p class="note" style="margin:0 0 8px">Strategi punya 9 sub-model (lookback 5 s/d 360 hari). Makin banyak yang aktif, makin besar porsi koin itu. Bobot dikecilkan untuk koin yang lebih liar (target volatilitas 25%).</p>
 <div class="grid g4" id="sig" style="margin:0"></div></div>
@@ -291,6 +341,14 @@ async function load(){
  if(names.length){const vals=names.flatMap(n=>mk.series[n].filter(v=>v!=null)),lo=Math.min(0,...vals),hi=Math.max(0,...vals);
   $('mkt').innerHTML=line(mk.dates.map(()=>0),lo,hi,'var(--line)',1)+names.map((n,i)=>line(mk.series[n],lo,hi,COLORS[i%9],1.6)).join('');
   $('mktleg').innerHTML=names.map((n,i)=>{const v=mk.series[n].at(-1);return `<span><i style="background:${COLORS[i%9]}"></i>${n.replace('USDT','')} <b class="${sgn(v)}">${v>0?'+':''}${v}%</b></span>`}).join('')}
+ const pv=await j('/api/preview?mode='+m);
+ if(pv.ok){$('pvasof').textContent='· dihitung '+pv.as_of;
+  $('pvorders').innerHTML=pv.orders.length?pv.orders.map(o=>`<span class="${o.side==='BUY'?'pos':'neg'}" style="margin-right:14px"><b>${o.side==='BUY'?'BELI':'JUAL'}</b> ${o.symbol.replace('USDT','')} ${usd(o.notional)}</span>`).join(''):'<span class="mut">Tidak ada beli/jual kalau harga bertahan seperti sekarang.</span>';
+  $('pvcoins').innerHTML='<tr><th>Aset</th><th>Harga live</th><th>Sub-model</th><th>Tambah beli kalau tutup di atas</th><th>Jual sebagian kalau tutup di bawah</th></tr>'+pv.coins.map(c=>{
+   const up=c.buy_above?`${usd(c.buy_above)} <span class="mut">(+${((c.buy_above/c.price-1)*100).toFixed(1)}%)</span>`:'<span class="mut">semua aktif</span>';
+   const dn=c.sell_below?`${usd(c.sell_below)} <span class="mut">(${((c.sell_below/c.price-1)*100).toFixed(1)}%)</span>`:'<span class="mut">tidak ada posisi</span>';
+   return `<tr><td>${c.symbol.replace('USDT','')}</td><td>${usd(c.price)}</td><td>${c.active}/9</td><td>${up}</td><td>${dn}</td></tr>`}).join('')}
+ else{$('pvorders').innerHTML='<span class="mut">Harga live belum tersedia.</span>';$('pvcoins').innerHTML='';}
  const sg=await j('/api/signals');$('sigasof').textContent=sg.as_of?'· data '+sg.as_of:'';
  $('sig').innerHTML=Object.entries(sg.coins).map(([k,c])=>{const st=c.active===0?'Tidak ada tren naik':(c.active>=6?'Tren naik kuat':'Tren naik sebagian');
   const gap=c.close<c.hi20?`perlu +${((c.hi20/c.close-1)*100).toFixed(1)}% untuk tembus high 20 hari`:'di atas high 20 hari';
