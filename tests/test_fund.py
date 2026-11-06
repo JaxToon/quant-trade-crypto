@@ -66,6 +66,19 @@ def test_min_order_costs_little():
     assert abs(small.iloc[-1] / full.iloc[-1] - 1) < 0.02
 
 
+@pytest.mark.skipif(not HAVE_DATA, reason="research kline cache not present")
+def test_risk_multiple_is_a_pure_scaling_of_research_c4():
+    from research import strategies
+    close = _panel()["close"]
+    sig = strategies.sig_donchian(close).where(strategies.eligible(close), 0.0)
+    base = strategies.w_voltarget(sig, close)
+    _, t1 = core.targets(close, risk=1)
+    _, t2 = core.targets(close, risk=2)
+    pd.testing.assert_frame_equal(t1, base)
+    pd.testing.assert_frame_equal(t2, strategies._cap(base * 2))
+    assert t2.sum(axis=1).max() <= 1 + 1e-9
+
+
 def test_plan_orders_never_leaves_negative_cash():
     syms = ["A", "B"]
     orders, q, cash, *_ = core.plan_orders(

@@ -187,7 +187,7 @@ select{background:var(--card);color:var(--fg);border:1px solid var(--line);borde
 .note{color:var(--mut);font-size:12px;margin:6px 0 0}
 </style></head><body><main>
 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-<h2>Fund Monitor <span class="sub">C4 DONCH-VT · trend following harian · 8 koin</span></h2>
+<h2>Fund Monitor <span class="sub">C4 DONCH-VT ×2 · trend following harian · 8 koin · berhenti beli di drawdown 30%</span></h2>
 <select id="mode"><option value="paper">Paper</option><option value="live">Live</option></select></div>
 
 <div class="card light" style="margin-top:12px"><div class="dot" id="dot"></div><div id="lt"></div></div>

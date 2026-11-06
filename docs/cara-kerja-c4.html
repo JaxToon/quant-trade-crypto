@@ -124,6 +124,7 @@ canvas{display:block;width:100%}
       <li><b>Gabungkan 9 suara</b><p>Sub-model pendek bereaksi cepat, yang panjang hanya ikut di tren besar. Porsi koin sebanding dengan jumlah yang menyala, jadi bot masuk bertahap, tidak sekaligus.</p></li>
       <li><b>Kecilkan untuk koin yang liar</b><p>Kalau volatilitas 90 hari koin itu di atas 25% per tahun, porsinya dikecilkan sebanding. Koin yang dua kali lebih liar dapat porsi setengahnya.</p></li>
       <li><b>Bagi rata ke 8 koin</b><p>Modal dibagi ke koin-koin yang layak (minimal 365 hari riwayat). Satu koin paling banyak memegang 1/8 modal; sisanya tetap kas USDT.</p></li>
+      <li><b>Setelan risiko ×2</b><p>Fund Anda memakai porsi dua kali lipat dari versi riset: maksimal 25% per koin dan 100% total modal, tanpa pinjaman. Return dan penurunannya kira-kira ikut dua kali lipat.</p></li>
     </ol>
   </section>
 
@@ -131,9 +132,9 @@ canvas{display:block;width:100%}
     <h2>Yang perlu diingat</h2>
     <div class="facts" id="facts">
       <div class="fact"><b>10–15%</b><span>win rate. Sebagian besar trade kecil dan rugi; untung datang dari sedikit tren besar.</span></div>
-      <div class="fact"><b>~11%</b><span>rata-rata modal yang benar-benar di pasar. Sisanya kas, terutama saat pasar turun.</span></div>
-      <div class="fact"><b>13,7%</b><span>drawdown terburuk di backtest 2018–2024, dibanding 82,7% untuk buy-and-hold 8 koin.</span></div>
-      <div class="fact"><b>−3,9%</b><span>hasil di 2025–2026, saat buy-and-hold rugi −45%. Belum terbukti untung, jadi diuji di paper dulu.</span></div>
+      <div class="fact"><b>~22%</b><span>rata-rata modal yang benar-benar di pasar pada setelan ×2. Sisanya kas, terutama saat pasar turun.</span></div>
+      <div class="fact"><b>26,0%</b><span>penurunan terdalam ×2 di backtest 2018–2024 (return +38,6%/tahun), dibanding 82,7% untuk buy-and-hold 8 koin.</span></div>
+      <div class="fact"><b>−8,9%</b><span>hasil ×2 di 2025–2026, saat buy-and-hold rugi −45%. Belum terbukti untung, jadi diuji di paper dulu. Bot berhenti membeli kalau turun 30%.</span></div>
     </div>
   </section>
 </div>
@@ -226,9 +227,10 @@ function draw(){
     <span class="t">Volatilitas 90 hari</span><span>${v ? pct(v, 0) : '–'}</span>
     <span class="t">Skala (25% ÷ volatilitas, maks 1)</span><span>× ${scale.toFixed(2).replace('.', ',')}</span>
     <span class="t">Dibagi jumlah koin layak</span><span>÷ ${nn}</span>
-    <span class="t sum">Porsi BTC</span><span class="sum">${pct(wt, 2)}</span>`;
-  $('wbar').style.width = Math.min(100, wt / 0.125 * 100) + '%';
-  $('usd').textContent = `Dengan modal $1.000: sekitar $${(wt * 1000).toFixed(0)} di BTC. Batang penuh = porsi maksimum satu koin (1/8 = 12,5%).`;
+    <span class="t">Setelan risiko fund Anda</span><span>× 2</span>
+    <span class="t sum">Porsi BTC</span><span class="sum">${pct(Math.min(1, wt * 2), 2)}</span>`;
+  $('wbar').style.width = Math.min(100, wt * 2 / 0.25 * 100) + '%';
+  $('usd').textContent = `Dengan modal $1.000: sekitar $${(Math.min(1, wt * 2) * 1000).toFixed(0)} di BTC. Batang penuh = porsi maksimum satu koin (2 × 1/8 = 25%). Total semua koin tidak pernah lebih dari 100% modal.`;
   $('scrub').value = i;
 }
 

@@ -13,11 +13,15 @@ from research import strategies
 from fund import config
 
 
-def targets(close: pd.DataFrame, strategy: str = config.STRATEGY) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(signal, target weight) frames for every date, from the research code as-is."""
+def targets(close: pd.DataFrame, strategy: str = config.STRATEGY,
+            risk: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(signal, target weight) frames for every date, from the research code as-is,
+    scaled by the risk multiple and capped at 100% gross (no borrowing)."""
+    risk = config.RISK_MULTIPLIER if risk is None else risk
     sig_fn, w_fn = strategies.CANDIDATES[strategy]
     sig = sig_fn(close).where(strategies.eligible(close), 0.0)   # as run_comparison._run
-    return sig, w_fn(sig, close)
+    w = w_fn(sig, close)
+    return sig, (w if risk == 1 else strategies._cap(w * risk))
 
 
 def decide(t: np.ndarray, s: np.ndarray, h: np.ndarray, last_sig: np.ndarray,

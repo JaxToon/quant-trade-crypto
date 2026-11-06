@@ -35,3 +35,4 @@ data/FUND_KILL
 data/klines_universe/
 data/universe_fetch.log
 data/fund_loop.log
+data/fund_ledger_paper_*.json
