@@ -84,6 +84,17 @@ def _status(mode: str) -> dict:
         rel = [r["prices"][k] / p0[k] for k in config.UNIVERSE if k in r["prices"] and p0.get(k)]
         bh.append([r["date"], b.start_capital * float(np.mean(rel))] if rel else [r["date"], None])
 
+    # Backtest of the same period with the fund's own code (forward-test criterion 1).
+    bt_curve, gap = [], None
+    try:
+        from fund import report
+        c = report.compare(mode)
+        if c:
+            bt_curve = [[d, c["backtest"].get(d)] for d, _ in curve]
+            gap = c["gap"]
+    except Exception:
+        pass
+
     fees = sum(t.get("fee", t.get("commission", 0.0)) or 0.0 for t in b.trades)
     days_since = (today_utc() - pd.Timestamp(last["date"], tz="UTC")).days if last else None
     light = "red" if b.halted else ("yellow" if days_since is None or days_since > 1 else "green")
@@ -95,6 +106,7 @@ def _status(mode: str) -> dict:
             "bh_return": (bh[-1][1] / b.start_capital - 1) if bh and bh[-1][1] else None,
             "drawdown": 1 - equity / b.peak_equity if b.peak_equity else 0.0,
             "peak": b.peak_equity, "positions": positions, "curve": curve, "bh_curve": bh,
+            "bt_curve": bt_curve, "bt_gap": gap,
             "last_run": last.get("date"), "days_since_run": days_since,
             "started": b.runs[0]["date"] if b.runs else None,
             "n_runs": len(b.runs), "n_trades": len(b.trades), "fees": fees,
@@ -195,7 +207,7 @@ select{background:var(--card);color:var(--fg);border:1px solid var(--line);borde
 
 <div class="grid g2">
  <div class="card"><div class="k">Kurva ekuitas vs buy &amp; hold</div><svg id="curve" viewBox="0 0 600 200" preserveAspectRatio="none" style="height:200px"></svg>
-  <div class="legend"><span><i style="background:var(--g)"></i>Fund</span><span><i style="background:var(--mut)"></i>Buy &amp; hold 8 koin</span></div>
+  <div class="legend"><span><i style="background:var(--g)"></i>Fund (paper)</span><span><i style="background:var(--b)"></i>Backtest periode sama</span><span><i style="background:var(--mut)"></i>Buy &amp; hold semua aset</span></div>
   <p class="note" id="curvenote"></p></div>
  <div class="card"><div class="k">Pergerakan harga (% , 30 hari)</div><svg id="mkt" viewBox="0 0 600 200" preserveAspectRatio="none" style="height:200px"></svg>
   <div class="legend" id="mktleg"></div></div>
@@ -232,10 +244,11 @@ async function load(){
  $('lt').textContent=s.halted?'BERHENTI: '+s.halt_reason:(s.light==='green'?`Berjalan normal · run terakhir ${s.last_run} · mulai ${s.started}`:`Peringatan: run terakhir ${s.last_run} (${s.days_since_run} hari lalu)`);
  const bh=s.bh_return==null?'—':`<span class="${sgn(s.bh_return)}">${pct(s.bh_return)}</span>`;
  $('kpi').innerHTML=[['Ekuitas',usd(s.equity)],['Return fund',`<span class="${sgn(s.return)}">${pct(s.return)}</span>`],['Buy &amp; hold',bh],
-  ['Drawdown',pct(s.drawdown)],['Di pasar',pct(s.exposure,0)],['Total fee',usd(s.fees)]]
+  ['Drawdown',pct(s.drawdown)],['Di pasar',pct(s.exposure,0)],['Total fee',usd(s.fees)],
+  ['Selisih vs backtest',s.bt_gap==null?'—':`<span class="${Math.abs(s.bt_gap)<=0.01?'pos':'neg'}">${pct(s.bt_gap)}</span>`]]
   .map(([k,v])=>`<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
- const a=s.curve.map(p=>p[1]),b=s.bh_curve.map(p=>p[1]),all=a.concat(b.filter(x=>x!=null));
- if(a.length>=2){const lo=Math.min(...all),hi=Math.max(...all);$('curve').innerHTML=line(b,lo,hi,'var(--mut)',1.5)+line(a,lo,hi,'var(--g)',2.5)}
+ const a=s.curve.map(p=>p[1]),b=s.bh_curve.map(p=>p[1]),c=(s.bt_curve||[]).map(p=>p[1]),all=a.concat(b.filter(x=>x!=null),c.filter(x=>x!=null));
+ if(a.length>=2){const lo=Math.min(...all),hi=Math.max(...all);$('curve').innerHTML=line(b,lo,hi,'var(--mut)',1.5)+line(c,lo,hi,'var(--b)',1.5)+line(a,lo,hi,'var(--g)',2.5)}
  else $('curve').innerHTML='<text x="300" y="100" text-anchor="middle" fill="#8a91a0" font-size="14">Kurva muncul setelah 2 hari run</text>';
  $('curvenote').textContent=s.n_runs<30?`Baru ${s.n_runs} hari data: terlalu sedikit untuk menilai strategi.`:'';
  $('pos').innerHTML='<tr><th>Koin</th><th>Qty</th><th>Harga</th><th>Nilai</th><th>Porsi</th></tr>'+(s.positions.map(p=>

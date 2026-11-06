@@ -217,6 +217,12 @@ def _run(mode: str, dry_run: bool, broker, today) -> dict | None:
     book.runs.append(run_rec)
     ledger.save(book, path)
     notify.send(_summary(book, run_rec))
+    if today.dayofweek == 0:  # weekly forward-test report (paper vs backtest vs BTC)
+        try:
+            from fund import report
+            notify.send(report.text(report.compare(mode)))
+        except Exception as e:
+            log.warning("weekly report failed: %s", e)
     if mode == "live" and book.halted and run_rec.get("failed"):
         raise RuntimeError(run_rec["failed"])
     return run_rec

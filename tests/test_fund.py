@@ -305,6 +305,52 @@ def test_env_cannot_raise_risk_or_disable_the_halt(monkeypatch):
         importlib.reload(config)
 
 
+def test_report_paper_matches_backtest_when_every_day_runs(fake_market, monkeypatch):
+    from fund import report
+    today, tmp = fake_market
+    close = market.history(config.UNIVERSE, today)["close"]
+    monkeypatch.setattr(market, "todays_open", lambda syms, t: close.loc[t].to_dict())
+    days = close.index[-12:-2]
+    for d in days:
+        run_daily.run("paper", today=d)
+    c = report.compare("paper", panel={"open": close, "close": close})
+    assert c["runs"] == len(days)
+    assert c["gap"] == pytest.approx(0.0, abs=1e-12)        # same code, same prices, every day
+    assert "Syarat 1" in report.text(c)
+
+
+def test_report_flags_missed_days(fake_market, monkeypatch):
+    from fund import report
+    today, tmp = fake_market
+    close = market.history(config.UNIVERSE, today)["close"]
+    monkeypatch.setattr(market, "todays_open", lambda syms, t: close.loc[t].to_dict())
+    days = [d for i, d in enumerate(close.index[-30:-2]) if i % 3 != 1]   # laptop off every third day
+    for d in days:
+        run_daily.run("paper", today=d)
+    c = report.compare("paper", panel={"open": close, "close": close})
+    assert c["runs"] == len(days) and c["days"] > c["runs"]
+    assert c["backtest_return"] is not None
+
+
+def test_telegram_stop_and_resume_need_confirmation(fake_market):
+    from fund import telegram_bot as tb
+    today, tmp = fake_market
+    run_daily.run("paper", today=today)
+    pending = {}
+    assert "Ekuitas" in tb.handle("/status", pending)
+    assert "Yakin" in tb.handle("/stop", pending)
+    assert not os.path.exists(config.KILL_FILE)          # nothing happens without "ya"
+    assert "Stop pembelian aktif" in tb.handle("ya", pending)
+    assert os.path.exists(config.KILL_FILE)
+    assert "Yakin" in tb.handle("/lanjut", pending)
+    tb.handle("something else", pending)                  # any other message cancels
+    assert "/status" in tb.handle("ya", pending)          # stale "ya" does nothing
+    assert os.path.exists(config.KILL_FILE)
+    tb.handle("/lanjut", pending)
+    tb.handle("ya", pending)
+    assert not os.path.exists(config.KILL_FILE)
+
+
 def test_live_halts_when_exchange_holds_less_than_book(fake_market, monkeypatch):
     today, tmp = fake_market
     path = tmp / "live.json"
