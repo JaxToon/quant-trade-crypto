@@ -102,6 +102,7 @@ def fake_market(monkeypatch, tmp_path):
     monkeypatch.setattr(market, "todays_open", lambda syms, t: close.iloc[-1].to_dict())
     monkeypatch.setattr(config, "PAPER_LEDGER", str(tmp_path / "paper.json"))
     monkeypatch.setattr(config, "KILL_FILE", str(tmp_path / "KILL"))
+    monkeypatch.setattr(config, "LOCK_FILE", str(tmp_path / "fund.lock"))
     monkeypatch.setattr(run_daily.notify, "send", lambda text: True)
     return today, tmp_path
 
@@ -198,6 +199,110 @@ def test_live_refuses_without_explicit_capital(fake_market, monkeypatch):
     with pytest.raises(RuntimeError, match="FUND_LIVE_CAPITAL"):
         run_daily.run("live", broker=b, today=today)
     assert c.orders == []
+
+
+class BalanceClient(FakeClient):
+    """Fake exchange whose balances move with fills; can fail on the n-th order."""
+
+    def __init__(self, fail_on: int | None = None):
+        super().__init__()
+        self.bal = {"USDT": 1000.0}
+        self.fail_on = fail_on
+
+    def get_account(self):
+        return {"balances": [{"asset": a, "free": str(v), "locked": "0"} for a, v in self.bal.items()]}
+
+    def get_symbol_ticker(self, symbol):
+        return {"price": "100"}
+
+    def create_order(self, **kw):
+        if self.fail_on is not None and len(self.orders) + 1 == self.fail_on:
+            raise RuntimeError("exchange rejected the order")
+        q = float(kw["quantity"])
+        base = kw["symbol"].removesuffix("USDT")
+        sign = 1 if kw["side"] == "BUY" else -1
+        self.bal[base] = self.bal.get(base, 0.0) + sign * q
+        self.bal["USDT"] -= sign * q * 100
+        return super().create_order(**kw)
+
+
+def test_live_order_failure_mid_rebalance_books_what_happened(fake_market, monkeypatch):
+    today, tmp = fake_market
+    monkeypatch.setattr(config, "LIVE_LEDGER", str(tmp / "live.json"))
+    monkeypatch.setattr(config, "LIVE_MARKER", str(tmp / "live_marker"))
+    monkeypatch.setattr(config, "LOCK_FILE", str(tmp / "fund.lock"))
+    monkeypatch.setattr(config, "LIVE_CAPITAL", 1000.0)
+    c = BalanceClient(fail_on=2)
+    b = fbroker.ExchangeBroker(client=c, venue="tokocrypto", enabled=True, confirm_real_money=True)
+    with pytest.raises(RuntimeError, match="mid-rebalance"):
+        run_daily.run("live", broker=b, today=today)
+    book = ledger.load(str(tmp / "live.json"), "live", 1000)
+    assert book.halted and len(book.runs) == 1
+    filled = c.orders[0]
+    base_sym = filled["symbol"]
+    assert book.qty[base_sym] == pytest.approx(float(filled["quantity"]))   # the fill that happened is booked
+    assert book.cash == pytest.approx(c.bal["USDT"])                       # and the book matches the exchange
+    assert not os.path.exists(config.LOCK_FILE)
+
+
+def test_live_refuses_to_restart_from_scratch_after_ledger_loss(fake_market, monkeypatch):
+    today, tmp = fake_market
+    monkeypatch.setattr(config, "LIVE_LEDGER", str(tmp / "live.json"))
+    monkeypatch.setattr(config, "LIVE_MARKER", str(tmp / "live_marker"))
+    monkeypatch.setattr(config, "LOCK_FILE", str(tmp / "fund.lock"))
+    (tmp / "live_marker").write_text("")
+    with pytest.raises(RuntimeError, match="missing"):
+        run_daily.run("live", broker=object(), today=today)
+
+
+def test_run_lock_blocks_a_second_run_and_expires(fake_market, monkeypatch):
+    today, tmp = fake_market
+    lock = tmp / "fund.lock"
+    monkeypatch.setattr(config, "LOCK_FILE", str(lock))
+    lock.write_text("123")
+    with pytest.raises(run_daily.RunLocked):
+        run_daily.run("paper", today=today)
+    old = os.path.getmtime(lock) - config.LOCK_STALE_SECONDS - 10
+    os.utime(lock, (old, old))
+    assert run_daily.run("paper", today=today) is not None   # a crashed run's lock is taken over
+    assert not lock.exists()
+
+
+def test_stale_coin_is_held_while_others_trade(fake_market, monkeypatch):
+    today, tmp = fake_market
+    monkeypatch.setattr(config, "LOCK_FILE", str(tmp / "fund.lock"))
+    real_history = market.history
+    h = market.history(config.UNIVERSE, today)   # the fixture's frames
+    close = h["close"].copy()
+    close.loc[close.index[-1], "DOTUSDT"] = np.nan
+    monkeypatch.setattr(market, "history", lambda syms, t: {"open": close, "close": close, "stale": ["DOTUSDT"]})
+    opens = close.iloc[-2].to_dict()
+    opens.pop("DOTUSDT")
+    monkeypatch.setattr(market, "todays_open", lambda syms, t: dict(opens))
+    rec = run_daily.run("paper", today=today)
+    assert rec["stale"] == ["DOTUSDT"]
+    assert all(o["symbol"] != "DOTUSDT" for o in rec["orders"])
+
+
+def test_missed_monday_still_rebalances():
+    book = ledger.Book(mode="paper", start_capital=1000, cash=1000,
+                       runs=[{"date": "2026-11-08", "decision_day": "2026-11-07"}])  # Saturday
+    assert run_daily._rebalance_due(book, pd.Timestamp("2026-11-10", tz="UTC"))       # Tuesday, Monday missed
+    assert not run_daily._rebalance_due(book, pd.Timestamp("2026-11-08", tz="UTC"))   # Sunday
+
+
+def test_env_cannot_raise_risk_or_disable_the_halt(monkeypatch):
+    import importlib
+    monkeypatch.setenv("FUND_RISK_MULTIPLIER", "5")
+    monkeypatch.setenv("FUND_MAX_DRAWDOWN_HALT", "1")
+    try:
+        importlib.reload(config)
+        assert config.RISK_MULTIPLIER == 2.0
+        assert config.MAX_DRAWDOWN_HALT == 0.30
+    finally:
+        monkeypatch.delenv("FUND_RISK_MULTIPLIER")
+        monkeypatch.delenv("FUND_MAX_DRAWDOWN_HALT")
+        importlib.reload(config)
 
 
 def test_live_halts_when_exchange_holds_less_than_book(fake_market, monkeypatch):

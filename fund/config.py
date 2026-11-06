@@ -12,9 +12,11 @@ STRATEGY = "C4 DONCH-VT"                     # research/strategies.py CANDIDATES
 # Owner chose x2 on 2026-11-06 for a 25-30% drawdown tolerance. Backtest at x2:
 # DEV 2018-24 CAGR +38.6%, MaxDD 26.0%; 2025-26 -8.9%, MaxDD 21.1%. Gross is
 # still capped at 100% of equity (no borrowing).
-RISK_MULTIPLIER = float(os.getenv("FUND_RISK_MULTIPLIER", "2"))
+RISK_MULTIPLIER_MAX = 2.0                    # the owner's decision; raising it is a code change, not an env var
+RISK_MULTIPLIER = min(max(float(os.getenv("FUND_RISK_MULTIPLIER", "2")), 0.0), RISK_MULTIPLIER_MAX)
 UNIVERSE = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT",
-            "ADAUSDT", "SOLUSDT", "AVAXUSDT", "DOTUSDT"]  # = research.data.SYMBOLS
+            "ADAUSDT", "SOLUSDT", "AVAXUSDT", "DOTUSDT",   # = research.data.SYMBOLS
+            "PAXGUSDT"]  # gold token; added 2026-11-06 by research/PREREGISTRATION_ROUND2.md (C4+GOLD passed)
 BAND = 0.2                                   # Monday drift band, as pre-registered
 FEE = 0.003822                               # Tokocrypto per side (settings.VENUE_FEE_PCT)
 SLIPPAGE = 0.0005                            # per side, as in the research cost model
@@ -25,12 +27,15 @@ KLINE_DIR = os.path.join(DATA_DIR, "klines_live")   # never the pinned research 
 PAPER_LEDGER = os.path.join(DATA_DIR, "fund_ledger_paper.json")
 LIVE_LEDGER = os.path.join(DATA_DIR, "fund_ledger_live.json")
 KILL_FILE = os.path.join(DATA_DIR, "FUND_KILL")     # exists => no new buys, alert
+LOCK_FILE = os.path.join(DATA_DIR, "fund.lock")     # one run at a time (loop + scheduled task)
+LOCK_STALE_SECONDS = 2 * 3600                       # a lock older than this is a crashed run
+LIVE_MARKER = os.path.join(DATA_DIR, "fund_live_started")  # live ledger existed once; never silently recreate it
 
 PAPER_START_CAPITAL = float(os.getenv("FUND_PAPER_CAPITAL", "1000"))
 MIN_ORDER_USDT = 5.0                         # Tokocrypto minimum notional (measured)
 
 # Guards (FIA 2024 best practice, scaled to a once-a-day bot)
-MAX_DRAWDOWN_HALT = float(os.getenv("FUND_MAX_DRAWDOWN_HALT", "0.30"))
+MAX_DRAWDOWN_HALT = min(max(float(os.getenv("FUND_MAX_DRAWDOWN_HALT", "0.30")), 0.05), 0.30)
 # The owner's stated tolerance. Backtest worst at x2 was 26.0%; past 30%
 # something is wrong (data, code, or a regime the strategy never saw): stop
 # buying and tell the owner.

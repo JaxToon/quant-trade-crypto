@@ -37,30 +37,43 @@ def _load_symbol(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
     return df
 
 
-def history(symbols: list[str] = config.UNIVERSE, today: pd.Timestamp | None = None) -> dict[str, pd.DataFrame]:
-    """Wide open/close frames of complete bars up to and including yesterday.
+def history(symbols: list[str] = config.UNIVERSE, today: pd.Timestamp | None = None) -> dict:
+    """Wide open/close frames of complete bars up to and including yesterday, plus
+    "stale": the symbols whose newest complete bar is not yesterday's.
 
-    Raises StaleData if any symbol's newest complete bar is not yesterday.
+    A stale symbol is held as it is (no trade) while the rest of the fund trades,
+    so one bad feed cannot block every exit. Raises StaleData when more than half
+    the universe is stale: then the data source itself is suspect.
     """
     today = today if today is not None else today_utc()
-    frames = {s: _load_symbol(s, today) for s in symbols}
+    frames = {}
+    for s in symbols:
+        try:
+            frames[s] = _load_symbol(s, today)
+        except Exception:
+            frames[s] = pd.DataFrame(columns=["open", "close"], dtype=float)
     yesterday = today - timedelta(days=1)
     stale = {s: str(f.index[-1].date()) if len(f) else "none"
              for s, f in frames.items() if not len(f) or f.index[-1] != yesterday}
-    if stale:
-        raise StaleData(f"newest complete daily bar is not {yesterday.date()}: {stale}")
-    return {field: pd.DataFrame({s: f[field] for s, f in frames.items()}).sort_index()
-            for field in ("open", "close")}
+    if len(stale) * 2 > len(symbols):
+        raise StaleData(f"newest complete daily bar is not {yesterday.date()} for most coins: {stale}")
+    out = {field: pd.DataFrame({s: f[field] for s, f in frames.items()}).sort_index()
+           for field in ("open", "close")}
+    out["stale"] = sorted(stale)
+    return out
 
 
 def todays_open(symbols: list[str] = config.UNIVERSE, today: pd.Timestamp | None = None) -> dict[str, float]:
-    """Open of the current (in-progress) daily bar: the paper execution price."""
+    """Open of the current (in-progress) daily bar: the paper execution price.
+    Symbols without today's bar are left out; the caller values them at their last close."""
     today = today if today is not None else today_utc()
     out = {}
     for s in symbols:
-        k = rdata._get(f"{rdata.BASE}?symbol={s}&interval=1d&limit=2")
+        try:
+            k = rdata._get(f"{rdata.BASE}?symbol={s}&interval=1d&limit=2") or []
+        except Exception:
+            continue
         bar = next((b for b in k if pd.Timestamp(b[0], unit="ms", tz="UTC") == today), None)
-        if bar is None:
-            raise StaleData(f"{s}: no daily bar opened at {today.date()} yet")
-        out[s] = float(bar[1])
+        if bar is not None:
+            out[s] = float(bar[1])
     return out

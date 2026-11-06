@@ -1,21 +1,24 @@
 # Forward test fund (dikunci 6 November 2026, sebelum ada hasil)
 
 **Strategi:** C4 DONCH-VT dengan setelan risiko **×2** (pilihan pemilik, toleransi
-penurunan 25–30%). Sinyal sama dengan riset; ukuran posisi dikali dua, maksimal 25% per
-koin dan 100% total modal (tanpa pinjaman).
+penurunan 25–30%) pada **8 koin + emas (PAXG)**. Sinyal sama dengan riset; ukuran posisi
+dikali dua, maksimal 25% per aset dan 100% total modal (tanpa pinjaman). PAXG masuk karena
+lulus aturan riset putaran 2 (`research/PREREGISTRATION_ROUND2.md`); quant-critic mencatat
+bahwa itu alokasi emas 3–6%, bukan keunggulan baru, dan bagusnya di 2025–26 karena emas naik +59%.
 
 **Mulai:** 2026-11-06, paper, modal $1.000, ledger `data/fund_ledger_paper.json`.
-(Hari pertama sempat dijalankan di ×1; ledger itu diarsipkan sebagai
-`data/fund_ledger_paper_x1_archived_2026-11-06.json` dan tidak dihitung.)
+(Hari pertama sempat dijalankan di ×1, lalu di ×2 tanpa emas; kedua ledger itu diarsipkan
+sebagai `data/fund_ledger_paper_x1_archived_2026-11-06.json` dan
+`data/fund_ledger_paper_x2_nogold_archived_2026-11-06.json` dan tidak dihitung.)
 
-## Patokan dari backtest ×2 [TERUKUR, bukan janji]
+## Patokan dari backtest ×2, 8 koin + emas [TERUKUR, bukan janji]
 
 | | 2018–2024 | 2025–2026 |
 |---|---|---|
-| Return per tahun | +38,6% | −8,9% total |
-| Penurunan terdalam | 26,0% | 21,1% |
-| Tahun terbaik / terburuk | +101% / −13,3% | |
-| Rata-rata modal di pasar | ~22% | |
+| Return per tahun | +37,5% | −1,0% total |
+| Penurunan terdalam | 24,5% | 17,6% |
+| Tahun terbaik / terburuk | +100% / −12,8% | |
+| Rata-rata modal di pasar | ~26% | ~30% |
 
 Angka 2018–2024 kemungkinan terlalu bagus (8 koin dipilih dari yang masih hidup sekarang;
 lihat `docs/RISET_KOIN_2026-11.md`).

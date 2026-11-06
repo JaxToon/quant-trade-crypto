@@ -4,7 +4,8 @@
     python -m fund.run_daily --dry-run    # show the decision, change nothing
     python -m fund.run_daily --mode live  # exchange; refuses unless armed
 
-Idempotent: a second run on the same UTC day does nothing.
+Idempotent: a second run on the same UTC day does nothing, and a lock file
+keeps two runs (hourly loop + scheduled task) from overlapping.
 """
 from __future__ import annotations
 
@@ -12,13 +13,46 @@ import argparse
 import logging
 import os
 import sys
+import time
+from contextlib import contextmanager
 from datetime import timedelta
 
 import numpy as np
+import pandas as pd
 
 from fund import config, core, ledger, market, notify
 
 log = logging.getLogger("fund")
+
+
+class RunLocked(RuntimeError):
+    pass
+
+
+@contextmanager
+def run_lock(path: str):
+    """Exclusive lock file. A lock older than LOCK_STALE_SECONDS is a crashed run and is taken over."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.time() - os.path.getmtime(path) > config.LOCK_STALE_SECONDS:
+                os.remove(path)
+                continue
+            raise RunLocked(f"another fund run holds {path}")
+    else:
+        raise RunLocked(f"could not take {path}")
+    try:
+        os.write(fd, f"{os.getpid()} {time.time():.0f}\n".encode())
+        os.close(fd)
+        yield
+    finally:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
 
 def _summary(book: ledger.Book, run: dict) -> str:
@@ -29,13 +63,37 @@ def _summary(book: ledger.Book, run: dict) -> str:
         lines.append(f"  {o['side']} {o['symbol']} ${o['notional']:,.2f}")
     if not run["orders"]:
         lines.append("  no trades today")
+    if run.get("stale"):
+        lines.append(f"  held without trading (stale data): {', '.join(run['stale'])}")
     if book.halted:
         lines.append(f"HALTED: {book.halt_reason}")
     return "\n".join(lines)
 
 
+def _rebalance_due(book: ledger.Book, decision_day: pd.Timestamp) -> bool:
+    """True if a Monday falls after the last run's decision day, up to this one.
+    A missed Tuesday run no longer skips the week's drift rebalance."""
+    if not book.runs:
+        return decision_day.dayofweek == 0
+    prev = book.runs[-1]
+    last = (pd.Timestamp(prev["decision_day"], tz="UTC") if "decision_day" in prev
+            else pd.Timestamp(prev["date"], tz="UTC") - timedelta(days=1))
+    days = pd.date_range(last + timedelta(days=1), decision_day, freq="D")
+    return bool((days.dayofweek == 0).any())
+
+
 def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None) -> dict | None:
+    if dry_run:
+        return _run(mode, True, broker, today)
+    with run_lock(config.LOCK_FILE):
+        return _run(mode, False, broker, today)
+
+
+def _run(mode: str, dry_run: bool, broker, today) -> dict | None:
     path = config.PAPER_LEDGER if mode == "paper" else config.LIVE_LEDGER
+    if mode == "live" and not os.path.exists(path) and os.path.exists(config.LIVE_MARKER):
+        raise RuntimeError(f"live ledger {path} is missing but live trading has started before "
+                           f"({config.LIVE_MARKER}); restore it instead of starting over")
     book = ledger.load(path, mode, config.PAPER_START_CAPITAL)
     today = today if today is not None else market.today_utc()
     day = str(today.date())
@@ -49,14 +107,22 @@ def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None) -> 
     except market.StaleData as e:
         notify.send(f"Fund {mode}: NO TRADES today, data is stale. {e}")
         raise
+    stale = set(h.get("stale", []))
+    if stale:
+        notify.send(f"Fund {mode}: stale data for {sorted(stale)}; those are held without trading today")
     sig, tgt = core.targets(h["close"])
     decision_day = today - timedelta(days=1)
-    t = tgt.loc[decision_day, syms].to_numpy(dtype=float)
-    s = sig.loc[decision_day, syms].to_numpy(dtype=float)
-    rebalance = decision_day.dayofweek == 0
+    t = tgt.reindex(columns=syms).loc[decision_day].fillna(0.0).to_numpy(dtype=float)
+    s = sig.reindex(columns=syms).loc[decision_day].fillna(0.0).to_numpy(dtype=float)
+    rebalance = _rebalance_due(book, decision_day)
+    last_close = h["close"].ffill().iloc[-1]
 
     if mode == "paper":
         prices = market.todays_open(syms, today)
+        for k in syms:  # no open yet (stale feed): value it at its last close
+            if k not in prices:
+                stale.add(k)
+                prices[k] = float(last_close[k])
         qty, cash = dict(book.qty), book.cash
     else:
         if broker is None:
@@ -89,20 +155,24 @@ def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None) -> 
         book.start_capital = book.peak_equity = equity
     book.peak_equity = max(book.peak_equity, equity)
     dd = 1 - equity / book.peak_equity if book.peak_equity else 0.0
+    held = q * px / equity if equity > 0 else np.zeros(len(syms))
 
     if os.path.exists(config.KILL_FILE) and not book.halted:
         book.halted, book.halt_reason = True, f"kill switch file {config.KILL_FILE} present"
     if dd >= config.MAX_DRAWDOWN_HALT and not book.halted:
         book.halted, book.halt_reason = True, f"drawdown {dd:.1%} >= {config.MAX_DRAWDOWN_HALT:.0%} limit"
     if book.halted:
-        # Exits still happen; nothing is bought or added to.
-        held = q * px / equity if equity > 0 else np.zeros(len(syms))
-        t = np.minimum(t, held)
+        t = np.minimum(t, held)  # exits still happen; nothing is bought or added to
 
     last_sig = np.array([book.last_sig.get(k, 0.0) for k in syms])
+    hold = np.array([k in stale for k in syms])
+    if hold.any():  # stale coins keep their position and signal memory untouched
+        t = np.where(hold, held, t)
+        s = np.where(hold, last_sig, s)
     orders, new_q, new_cash, new_last, eq_before, fee = core.plan_orders(
         syms, qty, cash, prices, t, s, last_sig, rebalance,
         min_order=config.MIN_ORDER_USDT)
+    orders = [o for o in orders if o.symbol not in stale]
 
     too_big = [o for o in orders if o.notional > config.MAX_ORDER_FRACTION * equity]
     if too_big:
@@ -111,7 +181,7 @@ def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None) -> 
         raise RuntimeError(msg)
 
     run_rec = {"date": day, "decision_day": str(decision_day.date()), "rebalance": bool(rebalance),
-               "equity": eq_before, "drawdown": dd, "fee": fee,
+               "equity": eq_before, "drawdown": dd, "fee": fee, "stale": sorted(stale),
                "target": dict(zip(syms, map(float, t))), "prices": prices,
                "exposure": float(sum(new_q[k] * prices[k] for k in syms) / eq_before) if eq_before else 0.0,
                "orders": [{"symbol": o.symbol, "side": o.side, "qty": o.qty, "price": o.price,
@@ -126,17 +196,29 @@ def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None) -> 
         fills = [dict(o, fee=o["notional"] * config.COST, date=day) for o in run_rec["orders"]]
     else:
         before_q, before_c = broker.positions(syms)
-        fills = [dict(f, date=day) for f in broker.execute(orders, cash_available=cash)]
-        after_q, after_c = broker.positions(syms)
-        # Book moves by what actually changed on the exchange (fees included),
-        # attributable because the fund is the only thing trading during the run.
-        book.qty = {k: max(0.0, qty.get(k, 0.0) + after_q[k] - before_q[k]) for k in syms}
-        book.cash = cash + after_c - before_c
+        fills, failure = [], None
+        try:
+            fills = [dict(f, date=day) for f in broker.execute(orders, cash_available=cash)]
+        except Exception as e:  # an order failed mid-rebalance: book what DID happen, then stop
+            failure = e
+        finally:
+            after_q, after_c = broker.positions(syms)
+            # Book moves by what actually changed on the exchange (fees included),
+            # attributable because the fund is the only thing trading during the run.
+            book.qty = {k: max(0.0, qty.get(k, 0.0) + after_q[k] - before_q[k]) for k in syms}
+            book.cash = cash + after_c - before_c
+        if failure is not None:
+            book.halted = True
+            book.halt_reason = f"order failed mid-rebalance on {day}: {type(failure).__name__}: {failure}"
+            run_rec["failed"] = book.halt_reason
+        open(config.LIVE_MARKER, "a").close()
     book.last_sig = dict(zip(syms, map(float, new_last)))
     book.trades += fills
     book.runs.append(run_rec)
     ledger.save(book, path)
     notify.send(_summary(book, run_rec))
+    if mode == "live" and book.halted and run_rec.get("failed"):
+        raise RuntimeError(run_rec["failed"])
     return run_rec
 
 
@@ -152,6 +234,9 @@ def main(argv=None) -> int:
                         handlers=handlers)
     try:
         rec = run(a.mode, a.dry_run)
+    except RunLocked as e:
+        log.info("%s; skipping", e)
+        return 0
     except Exception as e:
         log.exception("fund run failed")
         notify.send(f"Fund {a.mode}: run FAILED: {type(e).__name__}: {e}")

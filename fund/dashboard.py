@@ -187,7 +187,7 @@ select{background:var(--card);color:var(--fg);border:1px solid var(--line);borde
 .note{color:var(--mut);font-size:12px;margin:6px 0 0}
 </style></head><body><main>
 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-<h2>Fund Monitor <span class="sub">C4 DONCH-VT ×2 · trend following harian · 8 koin · berhenti beli di drawdown 30%</span></h2>
+<h2>Fund Monitor <span class="sub">C4 DONCH-VT ×2 · trend following harian · 8 koin + emas (PAXG) · berhenti beli di drawdown 30%</span></h2>
 <select id="mode"><option value="paper">Paper</option><option value="live">Live</option></select></div>
 
 <div class="card light" style="margin-top:12px"><div class="dot" id="dot"></div><div id="lt"></div></div>
@@ -219,7 +219,7 @@ select{background:var(--card);color:var(--fg);border:1px solid var(--line);borde
 const $=id=>document.getElementById(id);
 const usd=x=>'$'+Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const pct=(x,d=2)=>(x*100).toFixed(d)+'%',sgn=x=>x>=0?'pos':'neg';
-const COLORS=['#f7931a','#8c8cff','#f0b90b','#23a7e0','#3cc8c8','#9945ff','#e84142','#e6007a'];
+const COLORS=['#f7931a','#8c8cff','#f0b90b','#23a7e0','#3cc8c8','#9945ff','#e84142','#e6007a','#c9a227'];
 function line(pts,lo,hi,color,w){const r=hi-lo||1,n=Math.max(pts.length-1,1);
  return `<polyline fill="none" stroke="${color}" stroke-width="${w}" vector-effect="non-scaling-stroke" points="${pts.map((v,i)=>v==null?'':(i/n*600).toFixed(1)+','+(190-(v-lo)/r*180).toFixed(1)).filter(Boolean).join(' ')}"/>`}
 async function j(u){return (await fetch(u)).json()}
@@ -245,8 +245,8 @@ async function load(){
  }
  const mk=await j('/api/market?days=30'),names=Object.keys(mk.series);
  if(names.length){const vals=names.flatMap(n=>mk.series[n].filter(v=>v!=null)),lo=Math.min(0,...vals),hi=Math.max(0,...vals);
-  $('mkt').innerHTML=line(mk.dates.map(()=>0),lo,hi,'var(--line)',1)+names.map((n,i)=>line(mk.series[n],lo,hi,COLORS[i%8],1.6)).join('');
-  $('mktleg').innerHTML=names.map((n,i)=>{const v=mk.series[n].at(-1);return `<span><i style="background:${COLORS[i%8]}"></i>${n.replace('USDT','')} <b class="${sgn(v)}">${v>0?'+':''}${v}%</b></span>`}).join('')}
+  $('mkt').innerHTML=line(mk.dates.map(()=>0),lo,hi,'var(--line)',1)+names.map((n,i)=>line(mk.series[n],lo,hi,COLORS[i%9],1.6)).join('');
+  $('mktleg').innerHTML=names.map((n,i)=>{const v=mk.series[n].at(-1);return `<span><i style="background:${COLORS[i%9]}"></i>${n.replace('USDT','')} <b class="${sgn(v)}">${v>0?'+':''}${v}%</b></span>`}).join('')}
  const sg=await j('/api/signals');$('sigasof').textContent=sg.as_of?'· data '+sg.as_of:'';
  $('sig').innerHTML=Object.entries(sg.coins).map(([k,c])=>{const st=c.active===0?'Tidak ada tren naik':(c.active>=6?'Tren naik kuat':'Tren naik sebagian');
   const gap=c.close<c.hi20?`perlu +${((c.hi20/c.close-1)*100).toFixed(1)}% untuk tembus high 20 hari`:'di atas high 20 hari';
