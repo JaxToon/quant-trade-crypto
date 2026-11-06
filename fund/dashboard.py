@@ -34,6 +34,28 @@ def _ledger_path(mode: str) -> str:
     return config.PAPER_LEDGER if mode == "paper" else config.LIVE_LEDGER
 
 
+_live_cache: dict = {"t": 0.0, "prices": {}}
+
+
+def _live_prices() -> dict[str, float]:
+    """Current prices for display only (the fund decides once a day on the daily open).
+    One request for all symbols, cached 30 s; empty on any network error."""
+    import json
+    import time
+    import urllib.parse
+    import urllib.request
+    if time.time() - _live_cache["t"] < 30:
+        return _live_cache["prices"]
+    try:
+        q = urllib.parse.quote(json.dumps(config.UNIVERSE, separators=(",", ":")))
+        with urllib.request.urlopen(f"https://data-api.binance.vision/api/v3/ticker/price?symbols={q}", timeout=5) as r:
+            prices = {d["symbol"]: float(d["price"]) for d in json.loads(r.read())}
+    except Exception:
+        prices = {}
+    _live_cache.update(t=time.time(), prices=prices)
+    return prices
+
+
 def _closes() -> pd.DataFrame:
     """Complete daily closes from the fund's own kline cache (no network)."""
     frames = {}
@@ -75,6 +97,12 @@ def _status(mode: str) -> dict:
     equity = b.cash + sum(p["value"] for p in positions)
     for p in positions:
         p["weight"] = p["value"] / equity if equity else 0.0
+    live = _live_prices()
+    for p in positions:
+        lp = live.get(p["symbol"])
+        p["live_price"], p["live_value"] = lp, (p["qty"] * lp if lp else None)
+    live_equity = (b.cash + sum(p["live_value"] for p in positions)
+                   if positions and all(p["live_value"] is not None for p in positions) else (b.cash if not positions else None))
 
     # Buy-and-hold equal weight across the universe, from the first run's prices.
     curve, bh = [], []
@@ -107,6 +135,9 @@ def _status(mode: str) -> dict:
             "drawdown": 1 - equity / b.peak_equity if b.peak_equity else 0.0,
             "peak": b.peak_equity, "positions": positions, "curve": curve, "bh_curve": bh,
             "bt_curve": bt_curve, "bt_gap": gap,
+            "live_equity": live_equity,
+            "live_return": (live_equity / b.start_capital - 1) if live_equity and b.start_capital else None,
+            "live_since_run": (live_equity / equity - 1) if live_equity and equity else None,
             "last_run": last.get("date"), "days_since_run": days_since,
             "started": b.runs[0]["date"] if b.runs else None,
             "n_runs": len(b.runs), "n_trades": len(b.trades), "fees": fees,
@@ -243,7 +274,8 @@ async function load(){
  $('dot').style.background={green:'var(--g)',yellow:'var(--y)',red:'var(--r)'}[s.light];
  $('lt').textContent=s.halted?'BERHENTI: '+s.halt_reason:(s.light==='green'?`Berjalan normal · run terakhir ${s.last_run} · mulai ${s.started}`:`Peringatan: run terakhir ${s.last_run} (${s.days_since_run} hari lalu)`);
  const bh=s.bh_return==null?'—':`<span class="${sgn(s.bh_return)}">${pct(s.bh_return)}</span>`;
- $('kpi').innerHTML=[['Ekuitas',usd(s.equity)],['Return fund',`<span class="${sgn(s.return)}">${pct(s.return)}</span>`],['Buy &amp; hold',bh],
+ const liveTxt=s.live_equity==null?'—':`${usd(s.live_equity)}<div class="mut" style="font-size:12px;font-weight:400">${s.live_since_run>=0?'+':''}${pct(s.live_since_run)} sejak run · resmi ${usd(s.equity)}</div>`;
+ $('kpi').innerHTML=[['Ekuitas live',liveTxt],['Return fund (resmi)',`<span class="${sgn(s.return)}">${pct(s.return)}</span>`],['Buy &amp; hold',bh],
   ['Drawdown',pct(s.drawdown)],['Di pasar',pct(s.exposure,0)],['Total fee',usd(s.fees)],
   ['Selisih vs backtest',s.bt_gap==null?'—':`<span class="${Math.abs(s.bt_gap)<=0.01?'pos':'neg'}">${pct(s.bt_gap)}</span>`]]
   .map(([k,v])=>`<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
@@ -251,8 +283,7 @@ async function load(){
  if(a.length>=2){const lo=Math.min(...all),hi=Math.max(...all);$('curve').innerHTML=line(b,lo,hi,'var(--mut)',1.5)+line(c,lo,hi,'var(--b)',1.5)+line(a,lo,hi,'var(--g)',2.5)}
  else $('curve').innerHTML='<text x="300" y="100" text-anchor="middle" fill="#8a91a0" font-size="14">Kurva muncul setelah 2 hari run</text>';
  $('curvenote').textContent=s.n_runs<30?`Baru ${s.n_runs} hari data: terlalu sedikit untuk menilai strategi.`:'';
- $('pos').innerHTML='<tr><th>Koin</th><th>Qty</th><th>Harga</th><th>Nilai</th><th>Porsi</th></tr>'+(s.positions.map(p=>
-  `<tr><td>${p.symbol.replace('USDT','')}</td><td>${p.qty.toPrecision(4)}</td><td>${usd(p.price)}</td><td>${usd(p.value)}</td><td>${pct(p.weight,1)}</td></tr>`).join('')||'<tr><td colspan=5 class="mut">Kas penuh</td></tr>');
+ $('pos').innerHTML='<tr><th>Koin</th><th>Qty</th><th>Harga beli/run</th><th>Harga live</th><th>Nilai live</th><th>+/-</th></tr>'+(s.positions.map(p=>{const ch=p.live_price?p.live_price/p.price-1:null;return `<tr><td>${p.symbol.replace('USDT','')}</td><td>${p.qty.toPrecision(4)}</td><td>${usd(p.price)}</td><td>${p.live_price?usd(p.live_price):'—'}</td><td>${p.live_value!=null?usd(p.live_value):usd(p.value)}</td><td class="${ch==null?'mut':sgn(ch)}">${ch==null?'—':(ch>=0?'+':'')+pct(ch)}</td></tr>`}).join('')||'<tr><td colspan=6 class="mut">Kas penuh</td></tr>');
  $('trades').innerHTML='<tr><th>Tanggal</th><th>Koin</th><th>Arah</th><th>Nilai</th><th>Fee</th></tr>'+(s.trades.map(t=>
   `<tr><td>${t.date}</td><td>${t.symbol.replace('USDT','')}</td><td class="${t.side==='BUY'?'pos':'neg'}">${t.side==='BUY'?'BELI':'JUAL'}</td><td>${usd(t.notional??(t.qty*(t.price||0)))}</td><td>${usd(t.fee??t.commission??0)}</td></tr>`).join('')||'<tr><td colspan=5 class="mut">Belum ada trade</td></tr>');
  }
@@ -269,7 +300,7 @@ async function load(){
  const lg=await j('/api/logs?n=40');$('logs').textContent=lg.lines.join('')||'Belum ada log';
 }
 async function ctl(a){const t=prompt('Token dashboard:');if(!t)return;const r=await fetch('/api/'+a+'?mode='+$('mode').value,{method:'POST',headers:{'X-Token':t}});alert(r.ok?'OK':'Gagal: '+(await r.json()).detail);load()}
-$('mode').onchange=load;load();setInterval(load,60000);
+$('mode').onchange=load;load();setInterval(load,30000);
 </script></body></html>"""
 
 
