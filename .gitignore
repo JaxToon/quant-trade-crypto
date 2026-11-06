@@ -37,3 +37,5 @@ data/universe_fetch.log
 data/fund_loop.log
 data/fund_ledger_paper_*.json
 data/telegram_bot.log
+data/klines_perp/
+data/intraday_fetch.log
