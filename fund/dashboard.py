@@ -22,7 +22,7 @@ import pandas as pd
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
-from fund import config, core, ledger
+from fund import config, core, ledger, market
 from fund.market import today_utc
 from research import strategies
 
@@ -40,18 +40,10 @@ _live_cache: dict = {"t": 0.0, "prices": {}}
 def _live_prices() -> dict[str, float]:
     """Current prices for display only (the fund decides once a day on the daily open).
     One request for all symbols, cached 30 s; empty on any network error."""
-    import json
     import time
-    import urllib.parse
-    import urllib.request
     if time.time() - _live_cache["t"] < 30:
         return _live_cache["prices"]
-    try:
-        q = urllib.parse.quote(json.dumps(config.UNIVERSE, separators=(",", ":")))
-        with urllib.request.urlopen(f"https://data-api.binance.vision/api/v3/ticker/price?symbols={q}", timeout=5) as r:
-            prices = {d["symbol"]: float(d["price"]) for d in json.loads(r.read())}
-    except Exception:
-        prices = {}
+    prices = market.live_prices()
     _live_cache.update(t=time.time(), prices=prices)
     return prices
 

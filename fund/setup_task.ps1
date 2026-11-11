@@ -1,10 +1,11 @@
 # Registers the fund as Windows Scheduled Tasks, so it runs without a terminal open.
 #
-#   TraderStuffFundDaily   paper run at 07:10 local (= 00:10 UTC on this machine,
-#                          SE Asia Standard Time, UTC+7), then hourly retries for
-#                          23 hours. The run is idempotent per UTC day and takes a
-#                          lock, so retries never trade twice; they only catch a run
-#                          that failed (late data) or was missed (PC off/asleep).
+#   TraderStuffFundDaemon  fund/daemon.py: every minute it values the book, writes a
+#                          heartbeat and enforces the drawdown halt; every hour (hh:10)
+#                          it makes the daily C4 run (idempotent per UTC day, replays
+#                          missed days). Started at logon and re-triggered every 15
+#                          minutes; a second copy exits at once, so a dead daemon is
+#                          back within 15 minutes.
 #   TraderStuffFundBot     Telegram commands (/status, /stop, /lanjut), at logon.
 #   TraderStuffFundDash    dashboard on http://127.0.0.1:8090, at logon.
 #
@@ -15,7 +16,9 @@
 
 param([switch]$Remove)
 $ErrorActionPreference = "Stop"
-$names = @("TraderStuffFundDaily", "TraderStuffFundBot", "TraderStuffFundDash")
+$names = @("TraderStuffFundDaemon", "TraderStuffFundBot", "TraderStuffFundDash")
+$retired = @("TraderStuffFundDaily")   # replaced by the daemon 2026-11-11
+foreach ($n in $retired) { Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue }
 
 if ($Remove) {
     foreach ($n in $names) { Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue }
@@ -28,15 +31,14 @@ $python = (Get-Command python.exe).Source
 $pythonw = Join-Path (Split-Path $python -Parent) "pythonw.exe"
 if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found next to $python" }
 
-# Daily run with hourly retries
-$daily = New-ScheduledTaskTrigger -Daily -At "07:10"
-$daily.Repetition = (New-ScheduledTaskTrigger -Once -At "07:10" -RepetitionInterval (New-TimeSpan -Hours 1) `
-    -RepetitionDuration (New-TimeSpan -Hours 23)).Repetition
-$runSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName "TraderStuffFundDaily" -Trigger $daily -Settings $runSettings -Force `
-    -Action (New-ScheduledTaskAction -Execute $pythonw -Argument "-m fund.run_daily --mode paper" -WorkingDirectory $repoRoot) `
-    -Description "TraderStuff fund: daily C4 paper run (fund/run_daily.py)" | Out-Null
+# The daemon: at logon, plus a 15-minute re-trigger that only matters if it died
+$every15 = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes 15)
+$daemonSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "TraderStuffFundDaemon" -Settings $daemonSettings -Force `
+    -Trigger @((New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME), $every15) `
+    -Action (New-ScheduledTaskAction -Execute $pythonw -Argument "-m fund.daemon --mode paper" -WorkingDirectory $repoRoot) `
+    -Description "TraderStuff fund: minute watch + hourly/daily C4 paper run (fund/daemon.py)" | Out-Null
 
 # Long-running services at logon, restarted if they die
 $svcSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -50,5 +52,5 @@ Register-ScheduledTask -TaskName "TraderStuffFundDash" -Trigger $logon -Settings
     -Description "TraderStuff fund: dashboard on 127.0.0.1:8090 (fund/dashboard.py)" | Out-Null
 
 Write-Host "Registered: $($names -join ', ') (python: $pythonw, cwd: $repoRoot)"
-Write-Host "Start the bot and dashboard now without logging off:"
-Write-Host "  Start-ScheduledTask TraderStuffFundBot; Start-ScheduledTask TraderStuffFundDash"
+Write-Host "Start everything now without logging off:"
+Write-Host "  Start-ScheduledTask TraderStuffFundDaemon; Start-ScheduledTask TraderStuffFundBot; Start-ScheduledTask TraderStuffFundDash"

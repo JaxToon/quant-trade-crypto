@@ -50,6 +50,13 @@ def status_text(mode: str = "paper") -> str:
              f"Drawdown {dd:.1%} (berhenti beli di {config.MAX_DRAWDOWN_HALT:.0%}) | di pasar {1 - b.cash / equity:.0%}",
              f"Run terakhir: {last.get('date', '-')}"]
     lines += [f"  {k.replace('USDT', '')}: ${v:,.2f}" for k, v in sorted(pos.items(), key=lambda kv: -kv[1])] or ["  Kas penuh"]
+    from fund import daemon
+    hb = daemon.read_heartbeat()
+    age = (time.time() - hb["ts"]) / 60 if hb else None
+    if age is None or age > 5:
+        lines.append("PERINGATAN: daemon mati" + (f" sejak {age / 60:.1f} jam lalu" if age else "") + ". Tidak ada run otomatis.")
+    elif "equity" in hb:
+        lines.append(f"Daemon hidup. Nilai sekarang ${hb['equity']:,.2f}, drawdown {hb['drawdown']:.1%}")
     if b.halted:
         lines.append(f"BERHENTI: {b.halt_reason}")
     elif os.path.exists(config.KILL_FILE):

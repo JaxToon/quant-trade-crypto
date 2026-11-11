@@ -39,3 +39,6 @@ data/fund_ledger_paper_*.json
 data/telegram_bot.log
 data/klines_perp/
 data/intraday_fetch.log
+data/fund_heartbeat.json*
+data/fund_equity_hourly.csv
+data/fund.lock

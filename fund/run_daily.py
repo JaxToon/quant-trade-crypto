@@ -63,6 +63,8 @@ def _summary(book: ledger.Book, run: dict) -> str:
         lines.append(f"  {o['side']} {o['symbol']} ${o['notional']:,.2f}")
     if not run["orders"]:
         lines.append("  no trades today")
+    if run.get("late_cost"):
+        lines.append(f"  late-run cost vs open: ${run['late_cost']:+.2f}")
     if run.get("stale"):
         lines.append(f"  held without trading (stale data): {', '.join(run['stale'])}")
     if book.halted:
@@ -82,14 +84,41 @@ def _rebalance_due(book: ledger.Book, decision_day: pd.Timestamp) -> bool:
     return bool((days.dayofweek == 0).any())
 
 
-def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None) -> dict | None:
+def run(mode: str = "paper", dry_run: bool = False, broker=None, today=None,
+        catch_up: bool = False) -> dict | None:
     if dry_run:
         return _run(mode, True, broker, today)
     with run_lock(config.LOCK_FILE):
+        if catch_up:
+            _catch_up(mode, today if today is not None else market.today_utc())
         return _run(mode, False, broker, today)
 
 
-def _run(mode: str, dry_run: bool, broker, today) -> dict | None:
+def _catch_up(mode: str, today: pd.Timestamp) -> list[str]:
+    """Replay the UTC days the bot was down for, oldest first.
+
+    Paper only: a paper run fills at that day's real open, which is still known,
+    so the replayed day is exactly what an on-time run would have booked (each
+    is flagged "backfilled"). Live cannot trade in the past; it only reports the gap.
+    """
+    path = config.PAPER_LEDGER if mode == "paper" else config.LIVE_LEDGER
+    book = ledger.load(path, mode, config.PAPER_START_CAPITAL)
+    if not book.runs:
+        return []
+    last = pd.Timestamp(book.last_run_date, tz="UTC")
+    missed = pd.date_range(last + timedelta(days=1), today - timedelta(days=1), freq="D")
+    if not len(missed):
+        return []
+    span = f"{missed[0].date()}..{missed[-1].date()} ({len(missed)} day(s))"
+    if mode != "paper":
+        notify.send(f"Fund live: no run on {span}. Those days cannot be traded after the fact.")
+        return []
+    done = [str(d.date()) for d in missed if _run(mode, False, None, d, backfilled=True)]
+    notify.send(f"Fund paper: bot was down {span}; replayed {len(done)} day(s) at each day's real open.")
+    return done
+
+
+def _run(mode: str, dry_run: bool, broker, today, backfilled: bool = False) -> dict | None:
     path = config.PAPER_LEDGER if mode == "paper" else config.LIVE_LEDGER
     if mode == "live" and not os.path.exists(path) and os.path.exists(config.LIVE_MARKER):
         raise RuntimeError(f"live ledger {path} is missing but live trading has started before "
@@ -187,6 +216,18 @@ def _run(mode: str, dry_run: bool, broker, today) -> dict | None:
                "orders": [{"symbol": o.symbol, "side": o.side, "qty": o.qty, "price": o.price,
                            "notional": o.notional} for o in orders]}
 
+    if backfilled:
+        run_rec["backfilled"] = True
+    elif mode == "paper" and today == market.today_utc():
+        # What filling at the market right now, instead of at the open, would have
+        # cost: the gap the live bot will actually pay for running late.
+        mark = market.live_prices(syms)
+        if mark:
+            run_rec["mark_prices"] = mark
+            run_rec["late_cost"] = float(sum(
+                (1 if o.side == "BUY" else -1) * (mark[o.symbol] / o.price - 1) * o.notional
+                for o in orders if o.symbol in mark))
+
     if dry_run:
         print(_summary(book, run_rec))
         return run_rec
@@ -216,6 +257,9 @@ def _run(mode: str, dry_run: bool, broker, today) -> dict | None:
     book.trades += fills
     book.runs.append(run_rec)
     ledger.save(book, path)
+    if backfilled:
+        log.info("BACKFILL: %s", _summary(book, run_rec).replace("\n", " | "))
+        return run_rec
     notify.send(_summary(book, run_rec))
     if today.dayofweek == 0:  # weekly forward-test report (paper vs backtest vs BTC)
         try:
@@ -239,7 +283,7 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=handlers)
     try:
-        rec = run(a.mode, a.dry_run)
+        rec = run(a.mode, a.dry_run, catch_up=True)
     except RunLocked as e:
         log.info("%s; skipping", e)
         return 0

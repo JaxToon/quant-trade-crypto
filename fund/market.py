@@ -27,14 +27,15 @@ def _load_symbol(symbol: str, end: pd.Timestamp) -> pd.DataFrame:
     """Complete daily bars strictly before `end`, cached and topped up."""
     os.makedirs(config.KLINE_DIR, exist_ok=True)
     path = os.path.join(config.KLINE_DIR, f"{symbol}_1d.parquet")
-    end_iso = end.strftime("%Y-%m-%d")
     if os.path.exists(path):
         old = pd.read_parquet(path)
         if len(old) and old.index[-1] >= end - timedelta(days=1):
             return old[old.index < end]
-    df = rdata.fetch(symbol, "1d", end=end_iso)
+    # Always fetch up to the real today, so replaying a past day (catch-up) fills
+    # the cache once instead of re-downloading the whole history for every day.
+    df = rdata.fetch(symbol, "1d", end=max(end, today_utc()).strftime("%Y-%m-%d"))
     df.to_parquet(path)
-    return df
+    return df[df.index < end]
 
 
 def history(symbols: list[str] = config.UNIVERSE, today: pd.Timestamp | None = None) -> dict:
@@ -64,16 +65,31 @@ def history(symbols: list[str] = config.UNIVERSE, today: pd.Timestamp | None = N
 
 
 def todays_open(symbols: list[str] = config.UNIVERSE, today: pd.Timestamp | None = None) -> dict[str, float]:
-    """Open of the current (in-progress) daily bar: the paper execution price.
-    Symbols without today's bar are left out; the caller values them at their last close."""
+    """Open of the daily bar that starts on `today`: the paper execution price.
+    Works for a past day too (catch-up after downtime replays that day's real open).
+    Symbols without that bar are left out; the caller values them at their last close."""
     today = today if today is not None else today_utc()
+    ms = int(today.timestamp() * 1000)
     out = {}
     for s in symbols:
         try:
-            k = rdata._get(f"{rdata.BASE}?symbol={s}&interval=1d&limit=2") or []
+            k = rdata._get(f"{rdata.BASE}?symbol={s}&interval=1d&startTime={ms}&limit=1") or []
         except Exception:
             continue
-        bar = next((b for b in k if pd.Timestamp(b[0], unit="ms", tz="UTC") == today), None)
-        if bar is not None:
-            out[s] = float(bar[1])
+        if k and k[0][0] == ms:
+            out[s] = float(k[0][1])
     return out
+
+
+def live_prices(symbols: list[str] = config.UNIVERSE) -> dict[str, float]:
+    """Last traded prices in one request. Empty on any network error: callers
+    must treat "no prices" as "unknown", never as zero."""
+    import json
+    import urllib.parse
+    import urllib.request
+    try:
+        q = urllib.parse.quote(json.dumps(list(symbols), separators=(",", ":")))
+        with urllib.request.urlopen(f"https://data-api.binance.vision/api/v3/ticker/price?symbols={q}", timeout=5) as r:
+            return {d["symbol"]: float(d["price"]) for d in json.loads(r.read())}
+    except Exception:
+        return {}

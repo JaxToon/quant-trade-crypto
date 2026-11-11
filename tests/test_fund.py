@@ -375,3 +375,57 @@ def test_live_halts_when_exchange_holds_less_than_book(fake_market, monkeypatch)
         run_daily.run("live", broker=b, today=today)
     assert c.orders == []
     assert ledger.load(str(path), "live", 1000).halted
+
+
+# ---------------------------------------------------------------- downtime catch-up + daemon
+
+def test_catch_up_after_downtime_equals_running_every_day(fake_market, monkeypatch):
+    today, tmp = fake_market
+    close = market.history(config.UNIVERSE, today)["close"]
+    monkeypatch.setattr(market, "todays_open", lambda syms, t: close.loc[t].to_dict())
+    days = list(close.index[-12:])
+    for d in days:
+        run_daily.run("paper", today=d)
+    every_day = ledger.load(config.PAPER_LEDGER, "paper", 1000)
+
+    os.remove(config.PAPER_LEDGER)
+    run_daily.run("paper", today=days[0])
+    run_daily.run("paper", today=days[-1], catch_up=True)      # bot was off for 10 days
+    book = ledger.load(config.PAPER_LEDGER, "paper", 1000)
+    assert [r["date"] for r in book.runs] == [str(d.date()) for d in days]
+    assert sum(bool(r.get("backfilled")) for r in book.runs) == 10
+    assert book.cash == pytest.approx(every_day.cash) and book.qty == pytest.approx(every_day.qty)
+    assert book.peak_equity == pytest.approx(every_day.peak_equity)
+
+
+def test_daemon_halts_buys_the_minute_drawdown_crosses_the_limit(fake_market, monkeypatch):
+    from fund import daemon
+    today, tmp = fake_market
+    monkeypatch.setattr(daemon, "HEARTBEAT", str(tmp / "hb.json"))
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send", lambda text: sent.append(text) or True)
+    run_daily.run("paper", today=today)
+    book = ledger.load(config.PAPER_LEDGER, "paper", 1000)
+    px = market.todays_open(config.UNIVERSE, today)
+    st = daemon.State()
+    sent.clear()                                                          # the daily summary itself
+
+    monkeypatch.setattr(market, "live_prices", lambda syms=None: px)
+    daemon.watch(st)
+    assert daemon.read_heartbeat()["equity"] == pytest.approx(book.cash + sum(q * px[k] for k, q in book.qty.items()))
+    assert not sent
+
+    book.peak_equity = daemon.read_heartbeat()["equity"] / 0.78           # 22% under the peak
+    ledger.save(book, config.PAPER_LEDGER)
+    daemon.watch(st); daemon.watch(st)
+    assert len(sent) == 1 and "drawdown 22" in sent[0]                   # warned once, not every minute
+
+    book.peak_equity = daemon.read_heartbeat()["equity"] / 0.69           # 31% under the peak
+    ledger.save(book, config.PAPER_LEDGER)
+    daemon.watch(st); daemon.watch(st)
+    assert ledger.load(config.PAPER_LEDGER, "paper", 1000).halted
+    assert len(sent) == 2 and "HALTED" in sent[1]
+
+    monkeypatch.setattr(market, "live_prices", lambda syms=None: {})      # feed down: never value at zero
+    daemon.watch(st)
+    assert daemon.read_heartbeat()["prices_ok"] is False and "equity" not in daemon.read_heartbeat()
