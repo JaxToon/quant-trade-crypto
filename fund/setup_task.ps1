@@ -27,7 +27,9 @@ if ($Remove) {
 }
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
-$python = (Get-Command python.exe).Source
+# The project's venv first (the libraries the tests ran with), else python on PATH.
+$venvw = Join-Path $repoRoot ".venv\Scripts\pythonw.exe"
+if (Test-Path $venvw) { $python = Join-Path $repoRoot ".venv\Scripts\python.exe" } else { $python = (Get-Command python.exe).Source }
 $pythonw = Join-Path (Split-Path $python -Parent) "pythonw.exe"
 if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found next to $python" }
 
