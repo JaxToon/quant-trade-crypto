@@ -2,7 +2,7 @@
 
     python3 deploy/check_access.py
 """
-import json
+import urllib.error
 import urllib.request
 
 CHECKS = {
@@ -16,8 +16,10 @@ for name, url in CHECKS.items():
     try:
         with urllib.request.urlopen(url, timeout=15) as r:
             body = r.read(300).decode(errors="replace")
-        print(f"OK    {name}: {body[:120]}")
+        print(f"OK    {name}: {body[:80]!r}")
+    except urllib.error.HTTPError as e:  # the host answered, so it is reachable
+        print(f"OK    {name}: HTTP {e.code}")
     except Exception as e:
-        ok = ok and name.startswith("Telegram") and "404" in str(e)  # bare Telegram host answers 404 = reachable
-        print(f"{'OK' if 'Telegram' in name and '404' in str(e) else 'FAIL'}  {name}: {e}")
+        ok = False
+        print(f"FAIL  {name}: {e}")
 print("\nAll reachable: the fund can run here." if ok else "\nSomething is blocked: do not move the fund here yet.")

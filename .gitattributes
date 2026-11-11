@@ -4,3 +4,5 @@
 # Windows checkout with core.autocrlf=true would silently corrupt
 # start_system.sh/stop_system.sh on first commit.
 *.sh text eol=lf
+*.sh text eol=lf
+*.service text eol=lf
