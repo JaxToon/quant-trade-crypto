@@ -1,0 +1,14 @@
+[Unit]
+Description=TraderStuff fund Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=trader
+WorkingDirectory=/home/trader/TraderStuff
+ExecStart=/home/trader/TraderStuff/.venv/bin/python -m fund.telegram_bot
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
